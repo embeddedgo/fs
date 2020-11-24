@@ -67,9 +67,6 @@ func (fsys *FS) Type() string { return "term" }
 // Name implements the rtos.FS Name method
 func (fsys *FS) Name() string { return fsys.name }
 
-// Sync implements the rtos.FS Sync method.
-func (fsys *FS) Sync() error { return nil }
-
 type file struct {
 	fs     *FS
 	flag   int
