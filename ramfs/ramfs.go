@@ -99,7 +99,7 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, perm fs.FileMode, close
 	} else {
 		dir = find(&fsys.root, name[:i])
 		if _, ok := dir.data.(*node); !ok {
-			return nil, wrapErr("open", name, syscall.ENOTDIR)
+			return nil, wrapErr("open", name[:i], syscall.ENOTDIR)
 		}
 		name = name[i+1:]
 	}
