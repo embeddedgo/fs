@@ -28,7 +28,7 @@ type FS struct {
 }
 
 // New returns a new file system named name. The r and w are used respectively
-// to read from and write to the terminal device. The replaceLF string if not
+// to read from and write to the terminal device. If the replaceLF string is not
 // empty it is used to replace the new line character '\n' in output data.
 func New(name string, r io.Reader, w io.Writer, replaceLF string) *FS {
 	fsys := &FS{r: r, w: w, name: name}
@@ -42,23 +42,17 @@ func New(name string, r io.Reader, w io.Writer, replaceLF string) *FS {
 // must be ".", the flag can be O_RDWR, O_RDONLY, O_WRONLY, the perm is ignored.
 func (fsys *FS) OpenWithFinalizer(name string, flag int, perm fs.FileMode, closed func()) (fs.File, error) {
 	if name != "." {
-		return nil, syscall.ENOENT
+		return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.ENOENT}
 	}
-	switch flag {
-	case syscall.O_RDWR, syscall.O_RDONLY, syscall.O_WRONLY:
-		return &file{fsys, flag, closed}, nil
-	default:
-		return nil, syscall.EINVAL
+	if flag&(syscall.O_RDONLY|syscall.O_WRONLY|syscall.O_RDWR) != 0 {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EINVAL}
 	}
+	return &file{fsys, flag, closed}, nil
 }
 
 // Open implements the fs.FS Open method.
 func (fsys *FS) Open(name string) (fs.File, error) {
-	f, err := fsys.OpenWithFinalizer(name, syscall.O_RDONLY, 0, nil)
-	if err != nil {
-		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
-	}
-	return f, nil
+	return fsys.OpenWithFinalizer(name, syscall.O_RDONLY, 0, nil)
 }
 
 // Type implements the rtos.FS Type method
@@ -73,9 +67,16 @@ type file struct {
 	closed func()
 }
 
+func wrapErr(op string, err error) error {
+	if err != nil {
+		return &fs.PathError{Op: op, Path: ".", Err: err}
+	}
+	return nil
+}
+
 func (f *file) Read(p []byte) (int, error) {
 	if f.flag == syscall.O_WRONLY {
-		return 0, syscall.ENOTSUP
+		return 0, wrapErr("read", syscall.ENOTSUP)
 	}
 	if len(p) == 0 {
 		return 0, nil
@@ -83,14 +84,15 @@ func (f *file) Read(p []byte) (int, error) {
 	f.fs.rlock.Lock()
 	defer f.fs.rlock.Unlock()
 	if f.closed == nil {
-		return 0, syscall.EINVAL
+		return 0, wrapErr("read", syscall.EINVAL)
 	}
-	return f.fs.r.Read(p)
+	n, err := f.fs.r.Read(p)
+	return n, wrapErr("read", err)
 }
 
 func (f *file) Write(p []byte) (int, error) {
 	if f.flag == syscall.O_RDONLY {
-		return 0, syscall.ENOTSUP
+		return 0, wrapErr("write", syscall.ENOTSUP)
 	}
 	if len(p) == 0 {
 		return 0, nil
@@ -98,10 +100,12 @@ func (f *file) Write(p []byte) (int, error) {
 	f.fs.wlock.Lock()
 	defer f.fs.wlock.Unlock()
 	if f.closed == nil {
-		return 0, syscall.EINVAL
+		return 0, wrapErr("write", syscall.EINVAL)
 	}
 	if len(f.fs.replaceLF) == 0 {
-		return f.fs.w.Write(p)
+		n, err := f.fs.w.Write(p)
+		err = wrapErr("write", err)
+		return n, err
 	}
 	n := 0
 	for {
@@ -113,7 +117,7 @@ func (f *file) Write(p []byte) (int, error) {
 			m, err := f.fs.w.Write(p[n:m])
 			n += m
 			if err != nil {
-				return n, err
+				return n, wrapErr("write", err)
 			}
 		}
 		if n >= len(p) {
@@ -121,7 +125,7 @@ func (f *file) Write(p []byte) (int, error) {
 		}
 		_, err := f.fs.w.Write(f.fs.replaceLF[:])
 		if n++; n >= len(p) {
-			return n, err
+			return n, wrapErr("write", err)
 		}
 	}
 }
@@ -136,7 +140,7 @@ func (f *file) Close() error {
 	defer f.fs.wlock.Unlock()
 	defer f.fs.rlock.Unlock()
 	if f.closed == nil {
-		return syscall.EINVAL
+		return wrapErr("close", syscall.EINVAL)
 	}
 	f.closed()
 	f.closed = nil
