@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -16,11 +17,23 @@ import (
 // A node represents a filesystem node
 type node struct {
 	name string
-	lock sync.RWMutex
-	data interface{} // *node for directory, []byte for file
 	fs   *FS
 
-	next, prev *node // points to other nodes in the same directory
+	lock       sync.RWMutex
+	data       interface{} // *node for directory, []byte for file
+	next, prev *node       // points to other nodes in the same directory
+}
+
+const emptyNodeSize = (2 + 1 + 3 + 2 + 2) * 8 // approximate empty node size
+
+func (n *node) size() int64 {
+	var size int
+	if data, ok := n.data.([]byte); ok {
+		size = emptyNodeSize + cap(data)
+	} else {
+		size = 2 * emptyNodeSize
+	}
+	return int64(size)
 }
 
 // An FS represents a file system in RAM.
@@ -28,6 +41,7 @@ type FS struct {
 	size    int64
 	maxSize int64
 	root    node
+	items   int32
 }
 
 func New(maxSize int64) *FS {
@@ -36,7 +50,7 @@ func New(maxSize int64) *FS {
 	fsys.root.name = "."
 	fsys.root.next = &fsys.root
 	fsys.root.prev = &fsys.root
-	fsys.root.data = fsys.root
+	fsys.root.data = &fsys.root
 	return fsys
 }
 
@@ -76,9 +90,10 @@ func wrapErr(op, name string, err error) error {
 	return &fs.PathError{Op: op, Path: name, Err: err}
 }
 
+// OpenWithFinalizer implements the rtos.FS OpenWithFinalizer method.
 func (fsys *FS) OpenWithFinalizer(name string, flag int, perm fs.FileMode, closed func()) (fs.File, error) {
 	if !fs.ValidPath(name) {
-		return nil, wrapErr("open", name, syscall.ENOENT)
+		return nil, wrapErr("open", name, syscall.EINVAL)
 	}
 	if name == "." {
 		if flag&syscall.O_CREAT != 0 {
@@ -105,8 +120,13 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, perm fs.FileMode, close
 	}
 	n := find(dir, name)
 	if n == nil {
+		if atomic.AddInt64(&fsys.size, emptyNodeSize) > fsys.maxSize {
+			atomic.AddInt64(&fsys.size, -emptyNodeSize)
+			return nil, wrapErr("open", name, syscall.ENOSPC)
+		}
+		atomic.AddInt32(&fsys.items, 1)
 		list := dir.data.(*node)
-		n := &node{name: name, data: []byte{}, prev: list}
+		n := &node{name: name, fs: fsys, data: []byte{}, prev: list}
 		list.lock.Lock()
 		n.next = list.next
 		list.next.prev = n
@@ -118,6 +138,51 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, perm fs.FileMode, close
 		return nil, syscall.EEXIST
 	}
 	return open(n, name, closed, flag), nil
+}
+
+func nop() {}
+
+// Open implements the fs.FS Open method.
+func (fsys *FS) Open(name string) (fs.File, error) {
+	return fsys.OpenWithFinalizer(name, 0, 0, nop)
+}
+
+// Usage implements the rtos.UsageFS Usage method.
+func (fsys *FS) Usage() (usedItems, maxItems int, usedBytes, maxBytes int64) {
+	return int(atomic.LoadInt32(&fsys.items)), -1,
+		atomic.LoadInt64(&fsys.size), fsys.maxSize
+}
+
+func (fsys *FS) Remove(name string) error {
+	if !fs.ValidPath(name) {
+		return wrapErr("remove", name, syscall.EINVAL)
+	}
+	if name == "." {
+		return wrapErr("remove", name, syscall.ENOTSUP)
+	}
+	var dir *node
+	if i := strings.LastIndexByte(name, '/'); i < 0 {
+		dir = &fsys.root
+	} else {
+		dir = find(&fsys.root, name[:i])
+		if _, ok := dir.data.(*node); !ok {
+			return wrapErr("remove", name[:i], syscall.ENOTDIR)
+		}
+		name = name[i+1:]
+	}
+	list := dir.data.(*node)
+	list.lock.Lock()
+	defer list.lock.Unlock()
+	for n := list.next; n != list; n = n.next {
+		if n.name == name {
+			n.prev.next = n.next
+			n.next.prev = n.prev
+			atomic.AddInt32(&fsys.items, -1)
+			atomic.AddInt64(&fsys.size, -n.size())
+			return nil
+		}
+	}
+	return wrapErr("remove", name, syscall.ENOENT)
 }
 
 type fileinfo struct{}

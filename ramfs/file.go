@@ -19,24 +19,24 @@ type file struct {
 	rdwr int
 
 	lock   sync.Mutex
-	pos    int // use int instead of int64 for better speed on 32-bit arch
+	pos    int
 	closed func()
 }
 
 func (f *file) Read(p []byte) (int, error) {
 	if f.rdwr == syscall.O_WRONLY {
-		return 0, wrapErr(f.name, "read", syscall.ENOTSUP)
+		return 0, wrapErr("read", f.name, syscall.ENOTSUP)
 	}
 	f.n.lock.RLock()
 	defer f.n.lock.RUnlock()
 	data, ok := f.n.data.([]byte)
 	if !ok {
-		return 0, wrapErr(f.name, "read", syscall.EISDIR)
+		return 0, wrapErr("read", f.name, syscall.EISDIR)
 	}
 	f.lock.Lock()
 	defer f.lock.Unlock()
 	if f.closed == nil {
-		return wrapErr(f.name, "read", syscall.EBADF)
+		return 0, wrapErr("read", f.name, syscall.EBADF)
 	}
 	if f.pos >= len(data) {
 		return 0, io.EOF
@@ -48,24 +48,24 @@ func (f *file) Read(p []byte) (int, error) {
 
 func (f *file) Write(p []byte) (int, error) {
 	if f.rdwr == syscall.O_RDONLY {
-		return 0, wrapErr(f.name, "write", syscall.ENOTSUP)
+		return 0, wrapErr("write", f.name, syscall.ENOTSUP)
 	}
 	f.n.lock.Lock()
 	defer f.n.lock.Unlock()
 	data, ok := f.n.data.([]byte)
 	if !ok {
-		return 0, wrapErr(f.name, "write", syscall.EISDIR)
+		return 0, wrapErr("write", f.name, syscall.EISDIR)
 	}
 	f.lock.Lock()
 	defer f.lock.Unlock()
 	if f.closed == nil {
-		return wrapErr(f.name, "write", syscall.EBADF)
+		return 0, wrapErr("write", f.name, syscall.EBADF)
 	}
 	pos1 := f.pos + len(p)
 	if add := pos1 - cap(data); add > 0 {
 		if atomic.AddInt64(&f.n.fs.size, int64(add)) > f.n.fs.maxSize {
 			atomic.AddInt64(&f.n.fs.size, int64(-add))
-			return 0, wrapErr(f.name, "write", syscall.ENOSPC)
+			return 0, wrapErr("write", f.name, syscall.ENOSPC)
 		}
 		data1 := make([]byte, pos1)
 		copy(data1[:f.pos], data)
@@ -87,7 +87,7 @@ func (f *file) Close() error {
 	f.lock.Lock()
 	defer f.lock.Unlock()
 	if f.closed == nil {
-		return wrapErr(f.name, "close", syscall.EBADF)
+		return wrapErr("close", f.name, syscall.EBADF)
 	}
 	f.closed()
 	f.closed = nil
