@@ -50,9 +50,11 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, perm fs.FileMode, close
 	return &file{fsys, flag, closed}, nil
 }
 
+func nop() {}
+
 // Open implements the fs.FS Open method.
 func (fsys *FS) Open(name string) (fs.File, error) {
-	return fsys.OpenWithFinalizer(name, syscall.O_RDONLY, 0, nil)
+	return fsys.OpenWithFinalizer(name, syscall.O_RDONLY, 0, nop)
 }
 
 // Type implements the rtos.FS Type method
