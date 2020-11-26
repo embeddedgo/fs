@@ -84,7 +84,7 @@ func (f *file) Read(p []byte) (int, error) {
 	f.fs.rlock.Lock()
 	defer f.fs.rlock.Unlock()
 	if f.closed == nil {
-		return 0, wrapErr("read", syscall.EINVAL)
+		return 0, wrapErr("read", syscall.EBADF)
 	}
 	n, err := f.fs.r.Read(p)
 	return n, wrapErr("read", err)
@@ -100,7 +100,7 @@ func (f *file) Write(p []byte) (int, error) {
 	f.fs.wlock.Lock()
 	defer f.fs.wlock.Unlock()
 	if f.closed == nil {
-		return 0, wrapErr("write", syscall.EINVAL)
+		return 0, wrapErr("write", syscall.EBADF)
 	}
 	if len(f.fs.replaceLF) == 0 {
 		n, err := f.fs.w.Write(p)
@@ -135,12 +135,14 @@ func (f *file) Stat() (fs.FileInfo, error) {
 }
 
 func (f *file) Close() error {
+	// we assume that closing a terminal file is rare operation so we use the
+	// following expensive locking sequence instead of an additional f.lock
 	f.fs.rlock.Lock()
 	f.fs.wlock.Lock()
 	defer f.fs.wlock.Unlock()
 	defer f.fs.rlock.Unlock()
 	if f.closed == nil {
-		return wrapErr("close", syscall.EINVAL)
+		return wrapErr("close", syscall.EBADF)
 	}
 	f.closed()
 	f.closed = nil

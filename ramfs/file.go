@@ -7,17 +7,20 @@ package ramfs
 import (
 	"io"
 	"io/fs"
+	"sync"
 	"sync/atomic"
 	"syscall"
 )
 
 // A file represents an open file
 type file struct {
-	name   string
-	n      *node
+	name string
+	n    *node
+	rdwr int
+
+	lock   sync.Mutex
 	pos    int // use int instead of int64 for better speed on 32-bit arch
 	closed func()
-	rdwr   int
 }
 
 func (f *file) Read(p []byte) (int, error) {
@@ -29,6 +32,11 @@ func (f *file) Read(p []byte) (int, error) {
 	data, ok := f.n.data.([]byte)
 	if !ok {
 		return 0, wrapErr(f.name, "read", syscall.EISDIR)
+	}
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	if f.closed == nil {
+		return wrapErr(f.name, "read", syscall.EBADF)
 	}
 	if f.pos >= len(data) {
 		return 0, io.EOF
@@ -47,6 +55,11 @@ func (f *file) Write(p []byte) (int, error) {
 	data, ok := f.n.data.([]byte)
 	if !ok {
 		return 0, wrapErr(f.name, "write", syscall.EISDIR)
+	}
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	if f.closed == nil {
+		return wrapErr(f.name, "write", syscall.EBADF)
 	}
 	pos1 := f.pos + len(p)
 	if add := pos1 - cap(data); add > 0 {
@@ -71,6 +84,12 @@ func (f *file) Stat() (fs.FileInfo, error) {
 }
 
 func (f *file) Close() error {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	if f.closed == nil {
+		return wrapErr(f.name, "close", syscall.EBADF)
+	}
 	f.closed()
+	f.closed = nil
 	return nil
 }
