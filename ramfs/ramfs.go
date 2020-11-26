@@ -54,14 +54,15 @@ func New(maxSize int64) *FS {
 	return fsys
 }
 
-// find finds a node with path name inside directory dir
-func find(dir *node, name string) *node {
+// find searches the tree starting from root directory for a node with a given
+// path name.
+func find(root *node, name string) *node {
 	var name1 string
 	if i := strings.IndexByte(name, '/'); i > 0 {
 		name1 = name[i+1:]
 		name = name[:i]
 	}
-	list := dir.data.(*node)
+	list := root.data.(*node)
 	list.lock.RLock()
 	defer list.lock.RUnlock()
 	for n := list.next; n != list; n = n.next {
@@ -69,13 +70,30 @@ func find(dir *node, name string) *node {
 			if len(name1) == 0 {
 				return n
 			}
-			if dir1, ok := n.data.(*node); ok {
-				return find(dir1, name1)
+			if root1, ok := n.data.(*node); ok {
+				return find(root1, name1)
 			}
 			break
 		}
 	}
 	return nil
+}
+
+// findDir works like path.Split but also searches for a directory starting from
+// root directory and returns the corresponding node if found.
+func findDir(root *node, name string) (dir *node, base string) {
+	i := strings.LastIndexByte(name, '/')
+	if i < 0 {
+		return root, name
+	}
+	dir = find(root, name[:i])
+	if dir == nil {
+		return nil, ""
+	}
+	if _, ok := dir.data.(*node); !ok {
+		return nil, name[:i]
+	}
+	return dir, name[i+1:]
 }
 
 func open(n *node, name string, closed func(), flag int) fs.File {
@@ -108,17 +126,14 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, perm fs.FileMode, close
 		}
 		return open(n, name, closed, flag), nil
 	}
-	var dir *node
-	if i := strings.LastIndexByte(name, '/'); i < 0 {
-		dir = &fsys.root
-	} else {
-		dir = find(&fsys.root, name[:i])
-		if _, ok := dir.data.(*node); !ok {
-			return nil, wrapErr("open", name[:i], syscall.ENOTDIR)
+	dir, base := findDir(&fsys.root, name)
+	if dir == nil {
+		if base != "" {
+			return nil, wrapErr("open", base, syscall.ENOTDIR)
 		}
-		name = name[i+1:]
+		return nil, wrapErr("open", name, syscall.ENOENT)
 	}
-	n := find(dir, name)
+	n := find(dir, base)
 	if n == nil {
 		if atomic.AddInt64(&fsys.size, emptyNodeSize) > fsys.maxSize {
 			atomic.AddInt64(&fsys.size, -emptyNodeSize)
@@ -147,6 +162,10 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 	return fsys.OpenWithFinalizer(name, 0, 0, nop)
 }
 
+func (fsys *FS) Mkdir(name string) error {
+	return syscall.ENOTSUP
+}
+
 // Usage implements the rtos.UsageFS Usage method.
 func (fsys *FS) Usage() (usedItems, maxItems int, usedBytes, maxBytes int64) {
 	return int(atomic.LoadInt32(&fsys.items)), -1,
@@ -160,21 +179,15 @@ func (fsys *FS) Remove(name string) error {
 	if name == "." {
 		return wrapErr("remove", name, syscall.ENOTSUP)
 	}
-	var dir *node
-	if i := strings.LastIndexByte(name, '/'); i < 0 {
-		dir = &fsys.root
-	} else {
-		dir = find(&fsys.root, name[:i])
-		if _, ok := dir.data.(*node); !ok {
-			return wrapErr("remove", name[:i], syscall.ENOTDIR)
-		}
-		name = name[i+1:]
+	dir, base := findDir(&fsys.root, name)
+	if dir == nil {
+		return wrapErr("remove", name, syscall.ENOENT)
 	}
 	list := dir.data.(*node)
 	list.lock.Lock()
 	defer list.lock.Unlock()
 	for n := list.next; n != list; n = n.next {
-		if n.name == name {
+		if n.name == base {
 			n.prev.next = n.next
 			n.next.prev = n.prev
 			atomic.AddInt32(&fsys.items, -1)
@@ -183,6 +196,41 @@ func (fsys *FS) Remove(name string) error {
 		}
 	}
 	return wrapErr("remove", name, syscall.ENOENT)
+}
+
+func (fsys *FS) Rename(oldname, newname string) error {
+	olddir, oldbase := findDir(&fsys.root, oldname)
+	if olddir == nil {
+		return wrapErr("rename", oldname, syscall.ENOENT)
+	}
+	newdir, newbase := findDir(&fsys.root, newname)
+	if newdir == nil {
+		return wrapErr("rename", newname, syscall.ENOENT)
+	}
+	list := olddir.data.(*node)
+	list.lock.Lock()
+	n := list.next
+	for n != list {
+		if n.name == oldbase {
+			n.prev.next = n.next
+			n.next.prev = n.prev
+			break
+		}
+		n = n.next
+	}
+	list.lock.Unlock()
+	if n == list {
+		return wrapErr("rename", oldname, syscall.ENOENT)
+	}
+	list = newdir.data.(*node)
+	n.name = newbase
+	n.prev = list
+	list.lock.Lock()
+	n.next = list.next
+	list.next.prev = n
+	list.next = n
+	list.lock.Unlock()
+	return nil
 }
 
 type fileinfo struct{}

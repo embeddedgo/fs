@@ -97,4 +97,9 @@ func TestRAMFS(t *testing.T) {
 	_, err = f.Read(buf)
 	expectErr(t, io.EOF, err)
 	checkErr(t, f.Close())
+
+	checkErr(t, ramfs.Rename("a.txt", "b.txt"))
+
+	expectErr(t, syscall.ENOENT, ramfs.Remove("a.txt"))
+	checkErr(t, ramfs.Remove("b.txt"))
 }
