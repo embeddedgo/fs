@@ -16,22 +16,37 @@ import (
 
 // A node represents a filesystem node
 type node struct {
-	name string
+	name string // protected by the lock of the list to which the node belongs
 	fs   *FS
 
-	lock       sync.RWMutex
-	data       interface{} // *node for directory, []byte for file
-	next, prev *node       // points to other nodes in the same directory
+	lock       sync.RWMutex // protects the following fields
+	data       interface{}  // *node for directory, []byte for file
+	next, prev *node        // points to other nodes in the same directory
 }
 
-const emptyNodeSize = (2 + 1 + 3 + 2 + 2) * 8 // approximate empty node size
+const (
+	msbit = ^uintptr(0) - ^uintptr(0)>>1
+
+	logPtrSize = 2*(msbit>>31&1) + 3*(msbit>>63&1) + 4*(msbit>>127&1)
+	ptrSize    = 1 << logPtrSize
+
+	strSize   = 2 * ptrSize
+	sliSize   = 3 * ptrSize
+	lockSize  = 6 * 4
+	intrfSize = 2 * ptrSize
+
+	nodeSize = strSize + ptrSize + lockSize + intrfSize + 2*ptrSize
+
+	emptyFileSize = nodeSize + sliSize
+	dirSize       = nodeSize + nodeSize
+)
 
 func (n *node) size() int64 {
 	var size int
 	if data, ok := n.data.([]byte); ok {
-		size = emptyNodeSize + cap(data)
+		size = emptyFileSize + cap(data)
 	} else {
-		size = 2 * emptyNodeSize
+		size = dirSize
 	}
 	return int64(size)
 }
@@ -109,7 +124,7 @@ func wrapErr(op, name string, err error) error {
 }
 
 // OpenWithFinalizer implements the rtos.FS OpenWithFinalizer method.
-func (fsys *FS) OpenWithFinalizer(name string, flag int, perm fs.FileMode, closed func()) (fs.File, error) {
+func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed func()) (fs.File, error) {
 	if !fs.ValidPath(name) {
 		return nil, wrapErr("open", name, syscall.EINVAL)
 	}
@@ -135,13 +150,18 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, perm fs.FileMode, close
 	}
 	n := find(dir, base)
 	if n == nil {
-		if atomic.AddInt64(&fsys.size, emptyNodeSize) > fsys.maxSize {
-			atomic.AddInt64(&fsys.size, -emptyNodeSize)
+		if atomic.AddInt64(&fsys.size, emptyFileSize) > fsys.maxSize {
+			atomic.AddInt64(&fsys.size, -emptyFileSize)
 			return nil, wrapErr("open", name, syscall.ENOSPC)
 		}
 		atomic.AddInt32(&fsys.items, 1)
 		list := dir.data.(*node)
-		n := &node{name: name, fs: fsys, data: []byte{}, prev: list}
+		n := &node{
+			name: name,
+			fs:   fsys,
+			data: []byte{},
+			prev: list,
+		}
 		list.lock.Lock()
 		n.next = list.next
 		list.next.prev = n
@@ -162,8 +182,42 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 	return fsys.OpenWithFinalizer(name, 0, 0, nop)
 }
 
-func (fsys *FS) Mkdir(name string) error {
-	return syscall.ENOTSUP
+// Mkdir creates a directory with a given name.
+func (fsys *FS) Mkdir(name string, _ fs.FileMode) error {
+	if !fs.ValidPath(name) {
+		return wrapErr("mkdir", name, syscall.EINVAL)
+	}
+	if name == "." {
+		return wrapErr("mkdir", name, syscall.EEXIST)
+	}
+	dir, base := findDir(&fsys.root, name)
+	if dir == nil {
+		if base != "" {
+			return wrapErr("mkdir", base, syscall.ENOTDIR)
+		}
+		return wrapErr("mkdir", name, syscall.ENOENT)
+	}
+	if atomic.AddInt64(&fsys.size, dirSize) > fsys.maxSize {
+		atomic.AddInt64(&fsys.size, -dirSize)
+		return wrapErr("mkdir", name, syscall.ENOSPC)
+	}
+	atomic.AddInt32(&fsys.items, 1)
+	list := dir.data.(*node)
+	sublist := new(node)
+	sublist.prev = sublist
+	sublist.next = sublist
+	n := &node{
+		name: name,
+		fs:   fsys,
+		data: sublist,
+		prev: list,
+	}
+	list.lock.Lock()
+	n.next = list.next
+	list.next.prev = n
+	list.next = n
+	list.lock.Unlock()
+	return nil
 }
 
 // Usage implements the rtos.UsageFS Usage method.
@@ -185,17 +239,22 @@ func (fsys *FS) Remove(name string) error {
 	}
 	list := dir.data.(*node)
 	list.lock.Lock()
-	defer list.lock.Unlock()
-	for n := list.next; n != list; n = n.next {
+	n := list.next
+	for n != list {
 		if n.name == base {
 			n.prev.next = n.next
 			n.next.prev = n.prev
-			atomic.AddInt32(&fsys.items, -1)
-			atomic.AddInt64(&fsys.size, -n.size())
-			return nil
+			break
 		}
+		n = n.next
 	}
-	return wrapErr("remove", name, syscall.ENOENT)
+	list.lock.Unlock()
+	if n == list {
+		return wrapErr("remove", name, syscall.ENOENT)
+	}
+	atomic.AddInt32(&fsys.items, -1)
+	atomic.AddInt64(&fsys.size, -n.size())
+	return nil
 }
 
 func (fsys *FS) Rename(oldname, newname string) error {

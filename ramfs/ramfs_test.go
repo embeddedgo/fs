@@ -41,7 +41,17 @@ func checkRead(t *testing.T, r io.Reader, buf, expect []byte) {
 	}
 }
 
-func TestRAMFS(t *testing.T) {
+func checkUsage(t *testing.T, fsys *FS, usedItems int, usedBytes, maxBytes int) {
+	ui, mi, ub, mb := fsys.Usage()
+	if ui != usedItems || mi != -1 || ub != int64(usedBytes) || mb != int64(maxBytes) {
+		t.Fatalf(
+			"expected usage: %d, -1, %d B, %d B, got: %d, %d, %d B, %d B",
+			usedItems, usedBytes, maxBytes, ui, mi, ub, mb,
+		)
+	}
+}
+
+func TestFS(t *testing.T) {
 	const maxSize = 1024
 
 	ramfs := New(maxSize)
@@ -56,26 +66,25 @@ func TestRAMFS(t *testing.T) {
 	f, err := open("a.txt", 0, 0)
 	expectErr(t, syscall.ENOENT, err)
 
-	f, err = open("a.txt", syscall.O_CREAT, 0666)
+	f, err = open("a.txt", syscall.O_CREAT, 0)
 	checkErr(t, err)
 	data := []byte("test1234\n")
 	_, err = f.Write([]byte("test\n"))
 	expectErr(t, syscall.ENOTSUP, err)
 	checkErr(t, f.Close())
 
-	usedItems, maxItems, usedBytes, maxBytes := ramfs.Usage()
-	if usedItems != 1 || maxItems != -1 || usedBytes != emptyNodeSize || maxBytes != maxSize {
-		t.Fatal("ramfs.Usage")
-	}
+	checkUsage(t, ramfs, 1, emptyFileSize, maxSize)
 
-	f, err = open("a.txt", syscall.O_CREAT|syscall.O_EXCL, 0666)
+	f, err = open("a.txt", syscall.O_CREAT|syscall.O_EXCL, 0)
 	expectErr(t, syscall.EEXIST, err)
 
-	f, err = open("a.txt", syscall.O_WRONLY, 0666)
+	f, err = open("a.txt", syscall.O_WRONLY, 0)
 	checkErr(t, err)
 	checkWrite(t, f, data)
 	checkWrite(t, f, data)
 	checkErr(t, f.Close())
+
+	checkUsage(t, ramfs, 1, emptyFileSize+2*len(data), maxSize)
 
 	buf := make([]byte, 100)
 	f, err = open("a.txt", 0, 0)
@@ -86,10 +95,12 @@ func TestRAMFS(t *testing.T) {
 	expectErr(t, io.EOF, err)
 	checkErr(t, f.Close())
 
-	f, err = open("a.txt", syscall.O_WRONLY, 0666)
+	f, err = open("a.txt", syscall.O_WRONLY, 0)
 	checkErr(t, err)
 	checkWrite(t, f, data)
 	checkErr(t, f.Close())
+
+	checkUsage(t, ramfs, 1, emptyFileSize+2*len(data), maxSize)
 
 	f, err = open("a.txt", 0, 0)
 	checkErr(t, err)
@@ -98,8 +109,16 @@ func TestRAMFS(t *testing.T) {
 	expectErr(t, io.EOF, err)
 	checkErr(t, f.Close())
 
-	checkErr(t, ramfs.Rename("a.txt", "b.txt"))
+	checkErr(t, ramfs.Mkdir("D", 0))
+
+	checkUsage(t, ramfs, 2, emptyFileSize+2*len(data)+dirSize, maxSize)
+
+	checkErr(t, ramfs.Rename("a.txt", "D/b.txt"))
+
+	checkUsage(t, ramfs, 2, emptyFileSize+2*len(data)+dirSize, maxSize)
 
 	expectErr(t, syscall.ENOENT, ramfs.Remove("a.txt"))
-	checkErr(t, ramfs.Remove("b.txt"))
+	checkErr(t, ramfs.Remove("D/b.txt"))
+
+	checkUsage(t, ramfs, 1, dirSize, maxSize)
 }

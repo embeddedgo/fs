@@ -18,7 +18,7 @@ type file struct {
 	n    *node
 	rdwr int
 
-	lock   sync.Mutex
+	lock   sync.Mutex // protects the fields below
 	pos    int
 	closed func()
 }
