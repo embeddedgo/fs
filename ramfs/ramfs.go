@@ -22,24 +22,22 @@ type node struct {
 	name string
 	next *node // points to the next node in the same directory
 
-	lock sync.RWMutex // protects the following fields
-	list *node
-	data []byte
-	sec  int64
-	nsec int
+	lock    sync.RWMutex // protects the following fields
+	list    *node
+	data    []byte
+	modSec  int64
+	modNsec int
 }
 
 const (
-	msbit = ^uintptr(0) - ^uintptr(0)>>1
-
+	msbit      = ^uintptr(0) - ^uintptr(0)>>1
 	logPtrSize = 2*(msbit>>31&1) + 3*(msbit>>63&1) + 4*(msbit>>127&1)
-	ptrSize    = 1 << logPtrSize
 
-	intSize   = ptrSize
-	strSize   = 2 * ptrSize
-	sliSize   = 3 * ptrSize
-	lockSize  = 6 * 4
-	intrfSize = 2 * ptrSize
+	ptrSize  = 1 << logPtrSize
+	intSize  = ptrSize
+	strSize  = 2 * ptrSize
+	sliSize  = 3 * ptrSize
+	lockSize = 6 * 4
 
 	nodeSize = ptrSize + strSize + ptrSize + lockSize + ptrSize + sliSize + 8 + intSize
 
@@ -156,16 +154,16 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 		atomic.AddInt32(&fsys.items, 1)
 		mtime := time.Now()
 		n := &node{
-			isFile: fsys,
-			name:   base,
-			sec:    mtime.Unix(),
-			nsec:   mtime.Nanosecond(),
+			isFile:  fsys,
+			name:    base,
+			modSec:  mtime.Unix(),
+			modNsec: mtime.Nanosecond(),
 		}
 		dir.lock.Lock()
 		n.next = dir.list
 		dir.list = n
-		dir.sec = n.sec
-		dir.nsec = n.nsec
+		dir.modSec = n.modSec
+		dir.modNsec = n.modNsec
 		dir.lock.Unlock()
 		return open(n, name, closed, flag), nil
 	}
@@ -204,15 +202,15 @@ func (fsys *FS) Mkdir(name string, _ fs.FileMode) error {
 	atomic.AddInt32(&fsys.items, 1)
 	mtime := time.Now()
 	n := &node{
-		name: base,
-		sec:  mtime.Unix(),
-		nsec: mtime.Nanosecond(),
+		name:    base,
+		modSec:  mtime.Unix(),
+		modNsec: mtime.Nanosecond(),
 	}
 	dir.lock.Lock()
 	n.next = dir.list
 	dir.list = n
-	dir.sec = n.sec
-	dir.nsec = n.nsec
+	dir.modSec = n.modSec
+	dir.modNsec = n.modNsec
 	dir.lock.Unlock()
 	return nil
 }
@@ -271,42 +269,58 @@ func (fsys *FS) Rename(oldname, newname string) error {
 	if newdir == nil {
 		return wrapErr("rename", newname, syscall.ENOENT)
 	}
-	list := olddir.data.(*node)
-	list.lock.Lock()
-	n := list.next
-	for n != list {
+
+	olddir.lock.Lock()
+	n := olddir.list
+	if n != nil {
 		if n.name == oldbase {
-			n.prev.next = n.next
-			n.next.prev = n.prev
-			break
+			olddir.list = n.next
+		} else {
+			for {
+				prev := n
+				n = n.next
+				if n == nil {
+					break
+				}
+				if n.name == oldbase {
+					prev.next = n.next
+					break
+				}
+			}
 		}
-		n = n.next
 	}
-	list.lock.Unlock()
-	if n == list {
+	olddir.lock.Unlock()
+	if n == nil {
 		return wrapErr("rename", oldname, syscall.ENOENT)
 	}
-	list = newdir.data.(*node)
 	n.name = newbase
-	n.prev = list
-	list.lock.Lock()
-	n.next = list.next
-	list.next.prev = n
-	list.next = n
-	list.lock.Unlock()
+	newdir.lock.Lock()
+	n.next = newdir.list
+	newdir.list = n
+	newdir.lock.Unlock()
 	return nil
 }
 
-type fileinfo struct {
-	msec  int64
-	mnsec int
-	name  string
-	isdir bool
+type fileInfo struct {
+	modSec  int64
+	modNsec int
+	name    string
+	size    int
+	isDir   bool
 }
 
-func (fi *fileinfo) Name() string       { return "." }
-func (fi *fileinfo) Size() int64        { return 0 }
-func (fi *fileinfo) Mode() fs.FileMode  { return 0222 }
-func (fi *fileinfo) ModTime() time.Time { return time.Time{} }
-func (fi *fileinfo) IsDir() bool        { return false }
-func (fi *fileinfo) Sys() interface{}   { return nil }
+func (fi *fileInfo) Name() string     { return fi.name }
+func (fi *fileInfo) Size() int64      { return int64(fi.size) }
+func (fi *fileInfo) IsDir() bool      { return fi.isDir }
+func (fi *fileInfo) Sys() interface{} { return nil }
+
+func (fi *fileInfo) ModTime() time.Time {
+	return time.Unix(fi.modSec, int64(fi.modNsec))
+}
+
+func (fi *fileInfo) Mode() fs.FileMode {
+	if fi.isDir {
+		return fs.ModeDir & 0777
+	}
+	return 0666
+}

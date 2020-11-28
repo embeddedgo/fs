@@ -25,7 +25,7 @@ func (d *dir) Stat() (fs.FileInfo, error) {
 	return nil, syscall.ENOTSUP
 }
 
-func (d *dir) ReadDir(n int) ([]fileinfo, error) {
+func (d *dir) ReadDir(n int) ([]fileInfo, error) {
 	return nil, syscall.ENOTSUP
 }
 

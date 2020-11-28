@@ -7,6 +7,7 @@ package ramfs
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"syscall"
@@ -51,16 +52,21 @@ func checkUsage(t *testing.T, fsys *FS, usedItems int, usedBytes, maxBytes int) 
 	}
 }
 
+type rwFile interface {
+	fs.File
+	io.Writer
+}
+
 func TestFS(t *testing.T) {
 	const maxSize = 1024
 
 	ramfs := New(maxSize)
-	open := func(name string, flags int, perm fs.FileMode) (io.ReadWriteCloser, error) {
+	open := func(name string, flags int, perm fs.FileMode) (rwFile, error) {
 		f, err := ramfs.OpenWithFinalizer(name, flags, perm, nop)
 		if f == nil {
 			return nil, err
 		}
-		return f.(io.ReadWriteCloser), err
+		return f.(rwFile), err
 	}
 
 	f, err := open("a.txt", 0, 0)
@@ -116,6 +122,17 @@ func TestFS(t *testing.T) {
 	checkErr(t, ramfs.Rename("a.txt", "D/b.txt"))
 
 	checkUsage(t, ramfs, 2, emptyFileSize+2*len(data)+dirSize, maxSize)
+
+	f, err = open("D/b.txt", syscall.O_RDONLY, 0)
+	checkErr(t, err)
+	fi, err := f.Stat()
+	checkErr(t, err)
+	checkErr(t, f.Close())
+	fmt.Println("name:", fi.Name())
+	fmt.Println("size:", fi.Size())
+	fmt.Println("modTime:", fi.ModTime())
+	fmt.Println("isDir:", fi.IsDir())
+	fmt.Println("mode:", fi.Mode())
 
 	expectErr(t, syscall.ENOENT, ramfs.Remove("a.txt"))
 	checkErr(t, ramfs.Remove("D/b.txt"))

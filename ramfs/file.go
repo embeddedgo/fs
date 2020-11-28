@@ -7,6 +7,7 @@ package ramfs
 import (
 	"io"
 	"io/fs"
+	"path"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -70,19 +71,27 @@ func (f *file) Write(p []byte) (int, error) {
 		copy(data1[:f.pos], f.n.data)
 		f.n.data = data1
 	} else {
-		f.n.data = f.n.data[:pos1]
+		f.n.data = f.n.data[:pos1] ??????
 	}
 	copy(f.n.data[f.pos:], p)
 	f.pos = pos1
 	mtime := time.Now()
-	f.n.nsec = mtime.Nanosecond()
-	f.n.sec = mtime.Unix()
+	f.n.modSec = mtime.Unix()
+	f.n.modNsec = mtime.Nanosecond()
 	return len(p), nil
 }
 
 func (f *file) Stat() (fs.FileInfo, error) {
-	fi := new(fileinfo)
-	return fi, nil
+	info := &fileInfo{
+		name:  path.Base(f.name),
+		isDir: f.n.isFile == nil,
+	}
+	f.n.lock.RLock()
+	info.modSec = f.n.modSec
+	info.modNsec = f.n.modNsec
+	info.size = len(f.n.data)
+	f.n.lock.RUnlock()
+	return info, nil
 }
 
 func (f *file) Close() error {
