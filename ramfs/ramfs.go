@@ -16,12 +16,17 @@ import (
 
 // A node represents a filesystem node
 type node struct {
-	name string // protected by the lock of the list to which the node belongs
-	fs   *FS
+	isFile *FS // non-nil for file, nil for directory
 
-	lock       sync.RWMutex // protects the following fields
-	data       interface{}  // *node for directory, []byte for file
-	next, prev *node        // points to other nodes in the same directory
+	// the following three fields are protected by lock in the parent node
+	name string
+	next *node // points to the next node in the same directory
+
+	lock sync.RWMutex // protects the following fields
+	list *node
+	data []byte
+	sec  int64
+	nsec int
 }
 
 const (
@@ -30,23 +35,24 @@ const (
 	logPtrSize = 2*(msbit>>31&1) + 3*(msbit>>63&1) + 4*(msbit>>127&1)
 	ptrSize    = 1 << logPtrSize
 
+	intSize   = ptrSize
 	strSize   = 2 * ptrSize
 	sliSize   = 3 * ptrSize
 	lockSize  = 6 * 4
 	intrfSize = 2 * ptrSize
 
-	nodeSize = strSize + ptrSize + lockSize + intrfSize + 2*ptrSize
+	nodeSize = ptrSize + strSize + ptrSize + lockSize + ptrSize + sliSize + 8 + intSize
 
-	emptyFileSize = nodeSize + sliSize
-	dirSize       = nodeSize + nodeSize
+	emptyFileSize = nodeSize
+	dirSize       = nodeSize
 )
 
 func (n *node) size() int64 {
-	var size int
-	if data, ok := n.data.([]byte); ok {
-		size = emptyFileSize + cap(data)
-	} else {
-		size = dirSize
+	size := dirSize
+	if n.isFile != nil {
+		n.lock.RLock()
+		size = emptyFileSize + cap(n.data)
+		n.lock.RUnlock()
 	}
 	return int64(size)
 }
@@ -63,9 +69,6 @@ func New(maxSize int64) *FS {
 	fsys := new(FS)
 	fsys.maxSize = maxSize
 	fsys.root.name = "."
-	fsys.root.next = &fsys.root
-	fsys.root.prev = &fsys.root
-	fsys.root.data = &fsys.root
 	return fsys
 }
 
@@ -77,16 +80,15 @@ func find(root *node, name string) *node {
 		name1 = name[i+1:]
 		name = name[:i]
 	}
-	list := root.data.(*node)
-	list.lock.RLock()
-	defer list.lock.RUnlock()
-	for n := list.next; n != list; n = n.next {
+	root.lock.RLock()
+	defer root.lock.RUnlock()
+	for n := root.list; n != nil; n = n.next {
 		if n.name == name {
 			if len(name1) == 0 {
 				return n
 			}
-			if root1, ok := n.data.(*node); ok {
-				return find(root1, name1)
+			if n.isFile == nil {
+				return find(n, name1)
 			}
 			break
 		}
@@ -102,17 +104,14 @@ func findDir(root *node, name string) (dir *node, base string) {
 		return root, name
 	}
 	dir = find(root, name[:i])
-	if dir == nil {
-		return nil, ""
-	}
-	if _, ok := dir.data.(*node); !ok {
-		return nil, name[:i]
+	if dir == nil || dir.isFile != nil {
+		return dir, name[:i]
 	}
 	return dir, name[i+1:]
 }
 
 func open(n *node, name string, closed func(), flag int) fs.File {
-	if _, ok := n.data.(*node); ok {
+	if n.isFile == nil {
 		return &dir{name: name, n: n, closed: closed}
 	}
 	return &file{name: name, n: n, closed: closed,
@@ -143,10 +142,10 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 	}
 	dir, base := findDir(&fsys.root, name)
 	if dir == nil {
-		if base != "" {
-			return nil, wrapErr("open", base, syscall.ENOTDIR)
-		}
-		return nil, wrapErr("open", name, syscall.ENOENT)
+		return nil, wrapErr("open", base, syscall.ENOENT)
+	}
+	if dir.isFile != nil {
+		return nil, wrapErr("open", base, syscall.ENOTDIR)
 	}
 	n := find(dir, base)
 	if n == nil {
@@ -155,18 +154,19 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 			return nil, wrapErr("open", name, syscall.ENOSPC)
 		}
 		atomic.AddInt32(&fsys.items, 1)
-		list := dir.data.(*node)
+		mtime := time.Now()
 		n := &node{
-			name: name,
-			fs:   fsys,
-			data: []byte{},
-			prev: list,
+			isFile: fsys,
+			name:   base,
+			sec:    mtime.Unix(),
+			nsec:   mtime.Nanosecond(),
 		}
-		list.lock.Lock()
-		n.next = list.next
-		list.next.prev = n
-		list.next = n
-		list.lock.Unlock()
+		dir.lock.Lock()
+		n.next = dir.list
+		dir.list = n
+		dir.sec = n.sec
+		dir.nsec = n.nsec
+		dir.lock.Unlock()
 		return open(n, name, closed, flag), nil
 	}
 	if flag&syscall.O_EXCL != 0 {
@@ -192,31 +192,28 @@ func (fsys *FS) Mkdir(name string, _ fs.FileMode) error {
 	}
 	dir, base := findDir(&fsys.root, name)
 	if dir == nil {
-		if base != "" {
-			return wrapErr("mkdir", base, syscall.ENOTDIR)
-		}
-		return wrapErr("mkdir", name, syscall.ENOENT)
+		return wrapErr("mkdir", base, syscall.ENOENT)
+	}
+	if dir.isFile != nil {
+		return wrapErr("mkdir", base, syscall.ENOTDIR)
 	}
 	if atomic.AddInt64(&fsys.size, dirSize) > fsys.maxSize {
 		atomic.AddInt64(&fsys.size, -dirSize)
 		return wrapErr("mkdir", name, syscall.ENOSPC)
 	}
 	atomic.AddInt32(&fsys.items, 1)
-	list := dir.data.(*node)
-	sublist := new(node)
-	sublist.prev = sublist
-	sublist.next = sublist
+	mtime := time.Now()
 	n := &node{
-		name: name,
-		fs:   fsys,
-		data: sublist,
-		prev: list,
+		name: base,
+		sec:  mtime.Unix(),
+		nsec: mtime.Nanosecond(),
 	}
-	list.lock.Lock()
-	n.next = list.next
-	list.next.prev = n
-	list.next = n
-	list.lock.Unlock()
+	dir.lock.Lock()
+	n.next = dir.list
+	dir.list = n
+	dir.sec = n.sec
+	dir.nsec = n.nsec
+	dir.lock.Unlock()
 	return nil
 }
 
@@ -237,19 +234,27 @@ func (fsys *FS) Remove(name string) error {
 	if dir == nil {
 		return wrapErr("remove", name, syscall.ENOENT)
 	}
-	list := dir.data.(*node)
-	list.lock.Lock()
-	n := list.next
-	for n != list {
+	dir.lock.Lock()
+	n := dir.list
+	if n != nil {
 		if n.name == base {
-			n.prev.next = n.next
-			n.next.prev = n.prev
-			break
+			dir.list = n.next
+		} else {
+			for {
+				prev := n
+				n = n.next
+				if n == nil {
+					break
+				}
+				if n.name == base {
+					prev.next = n.next
+					break
+				}
+			}
 		}
-		n = n.next
 	}
-	list.lock.Unlock()
-	if n == list {
+	dir.lock.Unlock()
+	if n == nil {
 		return wrapErr("remove", name, syscall.ENOENT)
 	}
 	atomic.AddInt32(&fsys.items, -1)
@@ -292,7 +297,12 @@ func (fsys *FS) Rename(oldname, newname string) error {
 	return nil
 }
 
-type fileinfo struct{}
+type fileinfo struct {
+	msec  int64
+	mnsec int
+	name  string
+	isdir bool
+}
 
 func (fi *fileinfo) Name() string       { return "." }
 func (fi *fileinfo) Size() int64        { return 0 }
