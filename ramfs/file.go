@@ -62,16 +62,27 @@ func (f *file) Write(p []byte) (int, error) {
 	f.n.lock.Lock()
 	defer f.n.lock.Unlock()
 	pos1 := f.pos + len(p)
-	if add := pos1 - cap(f.n.data); add > 0 {
+	if pos1 > cap(f.n.data) {
+		var roundUp int
+		switch {
+		case cap(f.n.data) < 64:
+			roundUp = 15
+		case cap(f.n.data) < 256:
+			roundUp = 31
+		default:
+			roundUp = 63
+		}
+		newCap := (pos1 + roundUp) &^ roundUp
+		add := newCap - cap(f.n.data)
 		if atomic.AddInt64(&f.n.isFile.size, int64(add)) > f.n.isFile.maxSize {
 			atomic.AddInt64(&f.n.isFile.size, int64(-add))
 			return 0, wrapErr("write", f.name, syscall.ENOSPC)
 		}
-		data1 := make([]byte, pos1)
+		data1 := make([]byte, pos1, newCap)
 		copy(data1[:f.pos], f.n.data)
 		f.n.data = data1
-	} else {
-		f.n.data = f.n.data[:pos1] ??????
+	} else if pos1 > len(f.n.data) {
+		f.n.data = f.n.data[:pos1]
 	}
 	copy(f.n.data[f.pos:], p)
 	f.pos = pos1

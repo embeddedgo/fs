@@ -180,6 +180,12 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 	return fsys.OpenWithFinalizer(name, 0, 0, nop)
 }
 
+// Type implements the rtos.FS Type method.
+func (fsys *FS) Type() string { return "ram" }
+
+// Name implements the rtos.FS Name method.
+func (fsys *FS) Name() string { return "" }
+
 // Mkdir creates a directory with a given name.
 func (fsys *FS) Mkdir(name string, _ fs.FileMode) error {
 	if !fs.ValidPath(name) {
