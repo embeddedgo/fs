@@ -19,13 +19,12 @@ import (
 // FS is very simple and provides only one device file "." which can be opened,
 // written and read concurenly by multiple goroutines.
 type FS struct {
-	r        io.Reader
-	w        io.Writer
-	name     string
-	rlock    sync.Mutex
-	wlock    sync.Mutex
-	replaceR []string
-	replaceW []string
+	r       io.Reader
+	w       io.Writer
+	name    string
+	rlock   sync.Mutex
+	wlock   sync.Mutex
+	charMap CharMap
 }
 
 // New returns a new file system named name. The r and w are used respectively
@@ -35,24 +34,29 @@ func New(name string, r io.Reader, w io.Writer) *FS {
 	return &FS{r: r, w: w, name: name}
 }
 
+type CharMap uint32
+
 const (
-	CRtoLF   = "\r\n"
-	LFtoCRLF = "\n\r\n"
+	InCRLF    CharMap = 1 << 0  // map input "\r" to "\n"
+	OutLFCRLF CharMap = 1 << 16 // map output "\n" to "\r\n"
 )
 
-func (fsys *FS) SetReplaceIn(repl ...string) []string {
+func (fsys *FS) CharMap() CharMap {
 	fsys.rlock.Lock()
-	old := fsys.replaceR
-	fsys.replaceR = repl
+	fsys.wlock.Lock()
+	cmap := fsys.charMap
+	fsys.wlock.Unlock()
 	fsys.rlock.Unlock()
-	return old
+	return cmap
 }
 
-func (fsys *FS) SetReplaceOut(repl ...string) []string {
+func (fsys *FS) SetCharMap(cmap CharMap) CharMap {
+	fsys.rlock.Lock()
 	fsys.wlock.Lock()
-	old := fsys.replaceW
-	fsys.replaceW = repl
+	old := fsys.charMap
+	fsys.charMap = cmap
 	fsys.wlock.Unlock()
+	fsys.rlock.Unlock()
 	return old
 }
 
@@ -97,7 +101,7 @@ func wrapErr(op string, err error) error {
 	return nil
 }
 
-func (f *file) Read(p []byte) (int, error) {
+func (f *file) Read(p []byte) (n int, err error) {
 	if f.flag == syscall.O_WRONLY {
 		return 0, wrapErr("read", syscall.ENOTSUP)
 	}
@@ -105,13 +109,23 @@ func (f *file) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	f.fs.rlock.Lock()
-	defer f.fs.rlock.Unlock()
-	if f.closed == nil {
-		return 0, wrapErr("read", syscall.EBADF)
+	if f.closed != nil {
+		n, err = f.fs.r.Read(p)
+	} else {
+		err = wrapErr("read", syscall.EBADF)
 	}
-	n, err := f.fs.r.Read(p)
+	f.fs.rlock.Unlock()
+	if f.fs.charMap&InCRLF != 0 {
+		for i := 0; i < n; i++ {
+			if p[i] == '\r' {
+				p[i] = '\n'
+			}
+		}
+	}
 	return n, wrapErr("read", err)
 }
+
+var crlf = [...]byte{'\r', '\n'}
 
 func (f *file) Write(p []byte) (int, error) {
 	if f.flag == syscall.O_RDONLY {
@@ -125,7 +139,7 @@ func (f *file) Write(p []byte) (int, error) {
 	if f.closed == nil {
 		return 0, wrapErr("write", syscall.EBADF)
 	}
-	if len(f.fs.replaceW) == 0 {
+	if f.fs.charMap&OutLFCRLF == 0 {
 		n, err := f.fs.w.Write(p)
 		err = wrapErr("write", err)
 		return n, err
@@ -133,15 +147,9 @@ func (f *file) Write(p []byte) (int, error) {
 	n := 0
 	for {
 		m := n
-		var repl string
-	findRepl:
 		for {
-			b := p[m]
-			for i := range f.fs.replaceW {
-				repl = f.fs.replaceW[i]
-				if b == repl[0] {
-					break findRepl
-				}
+			if p[m] == '\n' {
+				break
 			}
 			m++
 			if m == len(p) {
@@ -158,7 +166,7 @@ func (f *file) Write(p []byte) (int, error) {
 				return n, nil
 			}
 		}
-		if _, err := io.WriteString(f.fs.w, repl[1:]); err != nil {
+		if _, err := f.fs.w.Write(crlf[:]); err != nil {
 			return n, wrapErr("write", err)
 		}
 		n++
