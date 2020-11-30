@@ -19,23 +19,41 @@ import (
 // FS is very simple and provides only one device file "." which can be opened,
 // written and read concurenly by multiple goroutines.
 type FS struct {
-	r         io.Reader
-	w         io.Writer
-	name      string
-	rlock     sync.Mutex
-	wlock     sync.Mutex
-	replaceLF []byte
+	r        io.Reader
+	w        io.Writer
+	name     string
+	rlock    sync.Mutex
+	wlock    sync.Mutex
+	replaceR []string
+	replaceW []string
 }
 
 // New returns a new file system named name. The r and w are used respectively
 // to read from and write to the terminal device. If the replaceLF string is not
 // empty it is used to replace the new line character '\n' in output data.
-func New(name string, r io.Reader, w io.Writer, replaceLF string) *FS {
-	fsys := &FS{r: r, w: w, name: name}
-	if len(replaceLF) != 0 && replaceLF != "\n" {
-		fsys.replaceLF = []byte(replaceLF)
-	}
-	return fsys
+func New(name string, r io.Reader, w io.Writer) *FS {
+	return &FS{r: r, w: w, name: name}
+}
+
+const (
+	CRtoLF   = "\r\n"
+	LFtoCRLF = "\n\r\n"
+)
+
+func (fsys *FS) SetReplaceIn(repl ...string) []string {
+	fsys.rlock.Lock()
+	old := fsys.replaceR
+	fsys.replaceR = repl
+	fsys.rlock.Unlock()
+	return old
+}
+
+func (fsys *FS) SetReplaceOut(repl ...string) []string {
+	fsys.wlock.Lock()
+	old := fsys.replaceW
+	fsys.replaceW = repl
+	fsys.wlock.Unlock()
+	return old
 }
 
 // OpenWithFinalizer implements the rtos.FS OpenWithFinalizer method. The name
@@ -44,7 +62,7 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, perm fs.FileMode, close
 	if name != "." {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.ENOENT}
 	}
-	if flag&(syscall.O_RDONLY|syscall.O_WRONLY|syscall.O_RDWR) != 0 {
+	if flag&^(syscall.O_RDONLY|syscall.O_WRONLY|syscall.O_RDWR) != 0 {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EINVAL}
 	}
 	return &file{fsys, flag, closed}, nil
@@ -62,6 +80,9 @@ func (fsys *FS) Type() string { return "term" }
 
 // Name implements the rtos.FS Name method
 func (fsys *FS) Name() string { return fsys.name }
+
+// Usage implements the rtos.FS Usage method
+func (fsys *FS) Usage() (int, int, int64, int64) { return -1, -1, -1, -1 }
 
 type file struct {
 	fs     *FS
@@ -104,7 +125,7 @@ func (f *file) Write(p []byte) (int, error) {
 	if f.closed == nil {
 		return 0, wrapErr("write", syscall.EBADF)
 	}
-	if len(f.fs.replaceLF) == 0 {
+	if len(f.fs.replaceW) == 0 {
 		n, err := f.fs.w.Write(p)
 		err = wrapErr("write", err)
 		return n, err
@@ -112,8 +133,20 @@ func (f *file) Write(p []byte) (int, error) {
 	n := 0
 	for {
 		m := n
-		for p[m] != '\n' {
+		var repl string
+	findRepl:
+		for {
+			b := p[m]
+			for i := range f.fs.replaceW {
+				repl = f.fs.replaceW[i]
+				if b == repl[0] {
+					break findRepl
+				}
+			}
 			m++
+			if m == len(p) {
+				break
+			}
 		}
 		if m != n {
 			m, err := f.fs.w.Write(p[n:m])
@@ -121,13 +154,16 @@ func (f *file) Write(p []byte) (int, error) {
 			if err != nil {
 				return n, wrapErr("write", err)
 			}
+			if n == len(p) {
+				return n, nil
+			}
 		}
-		if n >= len(p) {
-			return n, nil
-		}
-		_, err := f.fs.w.Write(f.fs.replaceLF[:])
-		if n++; n >= len(p) {
+		if _, err := io.WriteString(f.fs.w, repl[1:]); err != nil {
 			return n, wrapErr("write", err)
+		}
+		n++
+		if n == len(p) {
+			return n, nil
 		}
 	}
 }
