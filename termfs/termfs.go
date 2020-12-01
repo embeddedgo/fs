@@ -25,6 +25,7 @@ type FS struct {
 	rlock   sync.Mutex
 	wlock   sync.Mutex
 	charMap CharMap
+	echo    bool
 }
 
 // New returns a new file system named name. The r and w are used respectively
@@ -34,11 +35,11 @@ func New(name string, r io.Reader, w io.Writer) *FS {
 	return &FS{r: r, w: w, name: name}
 }
 
-type CharMap uint32
+type CharMap uint8
 
 const (
-	InCRLF    CharMap = 1 << 0  // map input "\r" to "\n"
-	OutLFCRLF CharMap = 1 << 16 // map output "\n" to "\r\n"
+	InCRLF    CharMap = 1 << 0 // map input "\r" to "\n"
+	OutLFCRLF CharMap = 1 << 4 // map output "\n" to "\r\n"
 )
 
 func (fsys *FS) CharMap() CharMap {
@@ -56,6 +57,25 @@ func (fsys *FS) SetCharMap(cmap CharMap) CharMap {
 	old := fsys.charMap
 	fsys.charMap = cmap
 	fsys.wlock.Unlock()
+	fsys.rlock.Unlock()
+	return old
+}
+
+// Echo returns the echo configuration.
+func (fsys *FS) Echo() bool {
+	fsys.rlock.Lock()
+	echo := fsys.echo
+	fsys.rlock.Unlock()
+	return echo
+}
+
+// SetEcho enables/disables echoing of input data. Only data read by fs.File
+// Read method are echoed so the echo is a confirmation the reading goroutine
+// has consumed certain data.
+func (fsys *FS) SetEcho(on bool) bool {
+	fsys.rlock.Lock()
+	old := fsys.echo
+	fsys.echo = on
 	fsys.rlock.Unlock()
 	return old
 }
@@ -122,15 +142,15 @@ func (f *file) Read(p []byte) (n int, err error) {
 			}
 		}
 	}
-	return n, wrapErr("read", err)
+	if !f.fs.echo || err != nil {
+		return n, wrapErr("read", err)
+	}
+	return f.write(p[:n])
 }
 
 var crlf = [...]byte{'\r', '\n'}
 
-func (f *file) Write(p []byte) (int, error) {
-	if f.flag == syscall.O_RDONLY {
-		return 0, wrapErr("write", syscall.ENOTSUP)
-	}
+func (f *file) write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -174,6 +194,13 @@ func (f *file) Write(p []byte) (int, error) {
 			return n, nil
 		}
 	}
+}
+
+func (f *file) Write(p []byte) (int, error) {
+	if f.flag == syscall.O_RDONLY {
+		return 0, wrapErr("write", syscall.ENOTSUP)
+	}
+	return f.write(p)
 }
 
 func (f *file) Stat() (fs.FileInfo, error) {
