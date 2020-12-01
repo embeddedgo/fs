@@ -24,13 +24,15 @@ type FS struct {
 	name    string
 	rlock   sync.Mutex
 	wlock   sync.Mutex
+	line    []byte
+	rpos    int
+	ansi    [6]byte
 	charMap CharMap
 	echo    bool
 }
 
 // New returns a new file system named name. The r and w are used respectively
-// to read from and write to the terminal device. If the replaceLF string is not
-// empty it is used to replace the new line character '\n' in output data.
+// to read from and write to the terminal device.
 func New(name string, r io.Reader, w io.Writer) *FS {
 	return &FS{r: r, w: w, name: name}
 }
@@ -51,14 +53,12 @@ func (fsys *FS) CharMap() CharMap {
 	return cmap
 }
 
-func (fsys *FS) SetCharMap(cmap CharMap) CharMap {
+func (fsys *FS) SetCharMap(cmap CharMap) {
 	fsys.rlock.Lock()
 	fsys.wlock.Lock()
-	old := fsys.charMap
 	fsys.charMap = cmap
 	fsys.wlock.Unlock()
 	fsys.rlock.Unlock()
-	return old
 }
 
 // Echo returns the echo configuration.
@@ -69,15 +69,45 @@ func (fsys *FS) Echo() bool {
 	return echo
 }
 
-// SetEcho enables/disables echoing of input data. Only data read by fs.File
-// Read method are echoed so the echo is a confirmation the reading goroutine
-// has consumed certain data.
-func (fsys *FS) SetEcho(on bool) bool {
+// SetEcho enables/disables echoing of input data. Data are echoed by fs.File
+// Read method. The echo is a confirmation that the reading goroutine is ready
+// to consume data.
+func (fsys *FS) SetEcho(on bool) {
 	fsys.rlock.Lock()
-	old := fsys.echo
 	fsys.echo = on
 	fsys.rlock.Unlock()
-	return old
+}
+
+// LineMode returns the configuration of line mode.
+func (fsys *FS) LineMode() (enabled bool, maxLen int) {
+	fsys.rlock.Lock()
+	enabled = fsys.ansi[0] != 0
+	maxLen = cap(fsys.line)
+	fsys.rlock.Unlock()
+	return
+}
+
+// SetLineMode allows to configure line mode. An enable enables/disables a line
+// mode, a maxLen allows to change the size of internal line buffer. The default
+// line bufer has zero size. Use maxLen > 0 to allocate a new one, maxLen == 0
+// to free it and maxLen < 0 to leave the line buffer unchanged.
+func (fsys *FS) SetLineMode(enable bool, maxLen int) {
+	fsys.rlock.Lock()
+	if enable {
+		fsys.ansi[0] = esc
+		fsys.ansi[1] = '['
+	} else {
+		fsys.ansi[0] = 0
+	}
+	fsys.rpos = -1
+	if maxLen >= 0 {
+		if maxLen == 0 {
+			fsys.line = nil
+		} else {
+			fsys.line = make([]byte, 0, maxLen)
+		}
+	}
+	fsys.rlock.Unlock()
 }
 
 // OpenWithFinalizer implements the rtos.FS OpenWithFinalizer method. The name
@@ -129,12 +159,18 @@ func (f *file) Read(p []byte) (n int, err error) {
 		return 0, nil
 	}
 	f.fs.rlock.Lock()
-	if f.closed != nil {
+	lineMode := f.fs.ansi[0] != 0
+	if f.closed == nil {
+		err = wrapErr("read", syscall.EBADF)
+	} else if !lineMode {
 		n, err = f.fs.r.Read(p)
 	} else {
-		err = wrapErr("read", syscall.EBADF)
+		n, err = f.readLine(p)
 	}
 	f.fs.rlock.Unlock()
+	if lineMode {
+		return n, err
+	}
 	if f.fs.charMap&InCRLF != 0 {
 		for i := 0; i < n; i++ {
 			if p[i] == '\r' {
