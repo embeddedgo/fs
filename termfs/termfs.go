@@ -94,8 +94,9 @@ func (fsys *FS) LineMode() (enabled bool, maxLen int) {
 func (fsys *FS) SetLineMode(enable bool, maxLen int) {
 	fsys.rlock.Lock()
 	if enable {
-		fsys.ansi[0] = esc
-		fsys.ansi[1] = '['
+		fsys.ansi[0] = '\b'
+		fsys.ansi[1] = esc
+		fsys.ansi[2] = '['
 	} else {
 		fsys.ansi[0] = 0
 	}

@@ -4,10 +4,7 @@
 
 package termfs
 
-import (
-	"errors"
-	"strconv"
-)
+import "errors"
 
 const esc = '\x1b'
 
@@ -43,12 +40,12 @@ func (f *file) readLine(p []byte) (n int, err error) {
 			f.fs.rpos = 0
 		case '\x7f': //  Delete
 			c = '\b'
+			buf[0] = c
 			fallthrough
 		case '\b': // Backspace
 			if x == 0 {
 				continue
 			}
-			x--
 		case esc:
 			if _, err := f.fs.r.Read(buf); err != nil {
 				return 0, err
@@ -60,23 +57,23 @@ func (f *file) readLine(p []byte) (n int, err error) {
 				return 0, err
 			}
 			switch buf[0] {
-			case 'C': // Cursor Forward
+			case 'C': // ANSI Cursor Forward
 				if x == len(f.fs.line) {
 					continue // end of line
 				}
-				f.fs.ansi[2] = 'C'
+				f.fs.ansi[3] = 'C'
 				x++
-			case 'D': // Cursor Back
+			case 'D': // ANSI Cursor Back
 				if x == 0 {
 					continue // beginning of the line
 				}
-				f.fs.ansi[2] = 'D'
+				f.fs.ansi[3] = 'D'
 				x--
 			default:
 				continue // skip unsupported CSI sequence
 			}
 			if f.fs.echo {
-				if _, err := f.write(f.fs.ansi[:3]); err != nil {
+				if _, err := f.write(f.fs.ansi[1:4]); err != nil {
 					return 0, err
 				}
 			}
@@ -86,47 +83,29 @@ func (f *file) readLine(p []byte) (n int, err error) {
 				continue // skip other special characters
 			}
 		}
-		if c != '\b' {
-			// make a room for a new char
-			m := len(f.fs.line)
-			f.fs.line = f.fs.line[:m+1]
-			if x != m {
-				copy(f.fs.line[x+1:], f.fs.line[x:])
-			}
-		}
-		f.fs.line[x] = c
 		m := len(f.fs.line)
 		if f.fs.echo {
 			if c == '\b' {
-				buf = f.fs.line[x : m+1]
-				buf[m-x] = ' '
-			} else {
-				buf = f.fs.line[x:m]
+				if x == m {
+					f.fs.ansi[3] = '\b' // this sequence deletes the last
+					f.fs.ansi[4] = ' '  // character on ANSI and non-ANSI
+					f.fs.ansi[5] = '\b' // terminals
+					buf = f.fs.ansi[3:6]
+				} else {
+					f.fs.ansi[3] = 'P' // ANSI Delete Character
+					buf = f.fs.ansi[:4]
+				}
+			} else if x != m {
+				f.fs.ansi[3] = '@' // ANSI Insert Character
+				f.fs.ansi[4] = c
+				buf = f.fs.ansi[1:5]
 			}
 			if _, err := f.write(buf); err != nil {
 				return 0, err
 			}
-			if n := len(buf) - 1; n > 0 {
-				// move cursor n characters back
-				if n == 1 {
-					// use '\b' instead of CSI D to support non-ANSI terminals
-					p[0] = '\b'
-					buf = p[:1]
-				} else if n <= 999 {
-					// use CSI n D sequence
-					buf = strconv.AppendInt(f.fs.ansi[:2], int64(n), 10)
-					m := len(buf)
-					buf = buf[:m+1]
-					buf[m] = 'D'
-				} else {
-					return 0, ErrLineTooLong
-				}
-				if _, err := f.write(buf); err != nil {
-					return 0, err
-				}
-			}
 		}
 		if c == '\b' {
+			x--
 			m--
 			if x != m {
 				copy(f.fs.line[x:], f.fs.line[x+1:])
@@ -134,6 +113,12 @@ func (f *file) readLine(p []byte) (n int, err error) {
 			f.fs.line = f.fs.line[:m]
 			continue
 		}
+		// insert new char
+		f.fs.line = f.fs.line[:m+1]
+		if x != m {
+			copy(f.fs.line[x+1:], f.fs.line[x:])
+		}
+		f.fs.line[x] = c
 		x++
 	}
 	n = copy(p, f.fs.line[f.fs.rpos:])
