@@ -19,16 +19,15 @@ import (
 // FS is very simple and provides only one device file "." which can be opened,
 // written and read concurenly by multiple goroutines.
 type FS struct {
-	r       io.Reader
-	w       io.Writer
-	name    string
-	rlock   sync.Mutex
-	wlock   sync.Mutex
-	line    []byte
-	rpos    int
-	ansi    [6]byte
-	charMap CharMap
-	echo    bool
+	r     io.Reader
+	w     io.Writer
+	name  string
+	rlock sync.Mutex
+	wlock sync.Mutex
+	line  []byte
+	rpos  int
+	ansi  [7]byte
+	flags CharMap
 }
 
 // New returns a new file system named name. The r and w are used respectively
@@ -41,13 +40,17 @@ type CharMap uint8
 
 const (
 	InCRLF    CharMap = 1 << 0 // map input "\r" to "\n"
-	OutLFCRLF CharMap = 1 << 4 // map output "\n" to "\r\n"
+	OutLFCRLF CharMap = 1 << 1 // map output "\n" to "\r\n"
+
+	mapFlags = (InCRLF | OutLFCRLF)
+	eof      = 1 << 6
+	echo     = 1 << 7
 )
 
 func (fsys *FS) CharMap() CharMap {
 	fsys.rlock.Lock()
 	fsys.wlock.Lock()
-	cmap := fsys.charMap
+	cmap := fsys.flags & mapFlags
 	fsys.wlock.Unlock()
 	fsys.rlock.Unlock()
 	return cmap
@@ -56,7 +59,7 @@ func (fsys *FS) CharMap() CharMap {
 func (fsys *FS) SetCharMap(cmap CharMap) {
 	fsys.rlock.Lock()
 	fsys.wlock.Lock()
-	fsys.charMap = cmap
+	fsys.flags = fsys.flags&^mapFlags | cmap&mapFlags
 	fsys.wlock.Unlock()
 	fsys.rlock.Unlock()
 }
@@ -64,7 +67,7 @@ func (fsys *FS) SetCharMap(cmap CharMap) {
 // Echo returns the echo configuration.
 func (fsys *FS) Echo() bool {
 	fsys.rlock.Lock()
-	echo := fsys.echo
+	echo := fsys.flags&echo != 0
 	fsys.rlock.Unlock()
 	return echo
 }
@@ -74,7 +77,12 @@ func (fsys *FS) Echo() bool {
 // to consume data.
 func (fsys *FS) SetEcho(on bool) {
 	fsys.rlock.Lock()
-	fsys.echo = on
+	if on {
+		fsys.flags |= echo
+	} else {
+		fsys.flags &^= echo
+	}
+	fsys.flags |= echo
 	fsys.rlock.Unlock()
 }
 
@@ -94,9 +102,9 @@ func (fsys *FS) LineMode() (enabled bool, maxLen int) {
 func (fsys *FS) SetLineMode(enable bool, maxLen int) {
 	fsys.rlock.Lock()
 	if enable {
-		fsys.ansi[0] = '\b'
-		fsys.ansi[1] = esc
-		fsys.ansi[2] = '['
+		fsys.ansi[0] = '\b' // useful to move cursor back in ANSI DCH sequence
+		fsys.ansi[1] = esc  // ANSI escape character
+		fsys.ansi[2] = '['  // ANSI Control Sequence Introducer
 	} else {
 		fsys.ansi[0] = 0
 	}
@@ -146,10 +154,10 @@ type file struct {
 }
 
 func wrapErr(op string, err error) error {
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return &fs.PathError{Op: op, Path: ".", Err: err}
 	}
-	return nil
+	return err
 }
 
 func (f *file) Read(p []byte) (n int, err error) {
@@ -172,14 +180,14 @@ func (f *file) Read(p []byte) (n int, err error) {
 	if lineMode {
 		return n, err
 	}
-	if f.fs.charMap&InCRLF != 0 {
+	if f.fs.flags&InCRLF != 0 {
 		for i := 0; i < n; i++ {
 			if p[i] == '\r' {
 				p[i] = '\n'
 			}
 		}
 	}
-	if !f.fs.echo || err != nil {
+	if f.fs.flags&echo == 0 || err != nil {
 		return n, wrapErr("read", err)
 	}
 	return f.write(p[:n])
@@ -196,7 +204,7 @@ func (f *file) write(p []byte) (int, error) {
 	if f.closed == nil {
 		return 0, wrapErr("write", syscall.EBADF)
 	}
-	if f.fs.charMap&OutLFCRLF == 0 {
+	if f.fs.flags&OutLFCRLF == 0 {
 		n, err := f.fs.w.Write(p)
 		err = wrapErr("write", err)
 		return n, err
