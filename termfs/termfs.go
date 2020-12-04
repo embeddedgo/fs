@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package termfs provides lightwait implementation of terminal device
+// Package termfs provides a lightwait implementation of terminal device
 // filesystem.
 package termfs
 
@@ -30,8 +30,8 @@ type FS struct {
 	flags CharMap
 }
 
-// New returns a new file system named name. The r and w are used respectively
-// to read from and write to the terminal device.
+// New returns a new terminal file system named name. The r and w correspond
+// to the terminal input and output device.
 func New(name string, r io.Reader, w io.Writer) *FS {
 	return &FS{r: r, w: w, name: name}
 }
@@ -40,7 +40,7 @@ type CharMap uint8
 
 const (
 	InCRLF    CharMap = 1 << 0 // map input "\r" to "\n"
-	OutLFCRLF CharMap = 1 << 1 // map output "\n" to "\r\n"
+	OutLFCRLF CharMap = 1 << 3 // map output "\n" to "\r\n"
 
 	mapFlags = (InCRLF | OutLFCRLF)
 	eof      = 1 << 6
@@ -95,10 +95,15 @@ func (fsys *FS) LineMode() (enabled bool, maxLen int) {
 	return
 }
 
-// SetLineMode allows to configure line mode. An enable enables/disables a line
-// mode, a maxLen allows to change the size of internal line buffer. The default
-// line bufer has zero size. Use maxLen > 0 to allocate a new one, maxLen == 0
-// to free it and maxLen < 0 to leave the line buffer unchanged.
+// SetLineMode allows to enable/disable the line mode and change the size of
+// the internal line buffer. The default line buffer has zero size. Use
+// maxLen > 0 to allocate a new one, maxLen == 0 to free it and maxLen < 0 to
+// leave the line buffer unchanged.
+//
+// In the line mode the terminal input is buffered until new-line character
+// received. Small subset of ANSI terminal codes is supported to enable editing
+// the line before passing it to the reading goroutine. There is also simple one
+// line history implemented (use up, down arrows).
 func (fsys *FS) SetLineMode(enable bool, maxLen int) {
 	fsys.rlock.Lock()
 	if enable {

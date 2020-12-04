@@ -13,7 +13,7 @@ import (
 
 const esc = '\x1b'
 
-var ErrLineTooLong = errors.New("line too long")
+var errLineTooLong = errors.New("line too long")
 
 func (f *file) readLine(p []byte) (n int, err error) {
 	if f.fs.rpos < 0 && f.fs.flags&eof != 0 {
@@ -27,8 +27,8 @@ func (f *file) readLine(p []byte) (n int, err error) {
 		}
 	}()
 	for x := 0; f.fs.rpos < 0; {
-		if len(f.fs.line) == cap(f.fs.line)-2 {
-			return 0, ErrLineTooLong
+		if len(f.fs.line) == cap(f.fs.line) {
+			return 0, errLineTooLong
 		}
 		buf := p[:1] // len(p) is at least 1, use it as one byte scratch buffer
 		if _, err := f.fs.r.Read(buf); err != nil {
@@ -83,28 +83,65 @@ func (f *file) readLine(p []byte) (n int, err error) {
 				if x == 0 {
 					continue // beginning of the line
 				}
-				n := x
-				if n > 999 {
-					n = 999
-				}
-				buf = strconv.AppendUint(f.fs.ansi[1:3], uint64(n), 10)
-				m := len(buf)
-				buf = buf[:m+1]
-				buf[m] = 'D'
+				buf = appendIntChar(f.fs.ansi[1:3], x, 'D')
 				x = 0
 			case 'F': // End
 				n := len(f.fs.line) - x
 				if n == 0 {
 					continue // end of line
 				}
-				if n > 999 {
-					n = 999
-				}
-				buf = strconv.AppendUint(f.fs.ansi[1:3], uint64(n), 10)
-				m := len(buf)
-				buf = buf[:m+1]
-				buf[m] = 'C'
+				buf = appendIntChar(f.fs.ansi[1:3], n, 'C')
 				x = len(f.fs.line)
+			case 'A': // ANSI Cursor Up, used for a cheap one-line history
+				if len(f.fs.line) != 0 {
+					continue
+				}
+				for i, c := range f.fs.line[:cap(f.fs.line)] {
+					if c < ' ' {
+						f.fs.line = f.fs.line[:i]
+						break
+					}
+				}
+				if len(f.fs.line) == 0 {
+					continue
+				}
+				buf = f.fs.line
+				x = len(f.fs.line)
+			case 'B': // ANSI Cursor Down, used to (reversibly) clear the line
+				if len(f.fs.line) == 0 {
+					continue
+				}
+				if f.fs.flags&echo != 0 {
+					if x != 0 {
+						buf = appendIntChar(f.fs.ansi[1:3], x, 'D')
+						if _, err := f.write(buf); err != nil {
+							return 0, err
+						}
+					}
+					buf = appendIntChar(f.fs.ansi[1:3], len(f.fs.line), 'P')
+				}
+				if m := len(f.fs.line); m != cap(f.fs.line) {
+					f.fs.line[:m+1][m] = 0
+				}
+				f.fs.line = f.fs.line[:0]
+				x = 0
+			//case '1': // xterm CTRL + Arrow, used to move cursor by word
+			//	buf = f.fs.ansi[3:6]
+			//	n, err := f.fs.r.Read(buf)
+			//	if err != nil {
+			//		return 0, err
+			//	}
+			//	if n != 3 || buf[0] != ';' || buf[1] != '5' {
+			//		continue
+			//	}
+			//	switch buf[2] {
+			//	case 'C': // xterm CTRL + ->
+			//		....
+			//	case 'D': // xterm CTRL + <-
+			//		....
+			//	default
+			//		continue
+			//	}
 			default:
 				continue // skip unsupported CSI sequence
 			}
@@ -154,6 +191,7 @@ func (f *file) readLine(p []byte) (n int, err error) {
 			if x != m {
 				copy(f.fs.line[x:], f.fs.line[x+1:])
 			}
+			f.fs.line[m] = 0
 			f.fs.line = f.fs.line[:m]
 			continue
 		}
@@ -172,4 +210,15 @@ func (f *file) readLine(p []byte) (n int, err error) {
 		f.fs.line = f.fs.line[:0]
 	}
 	return n, nil
+}
+
+func appendIntChar(buf []byte, n int, c byte) []byte {
+	if n > 999 {
+		n = 999
+	}
+	buf = strconv.AppendUint(buf, uint64(n), 10)
+	m := len(buf)
+	buf = buf[:m+1]
+	buf[m] = c
+	return buf
 }
