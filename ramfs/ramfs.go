@@ -121,13 +121,19 @@ func wrapErr(op, name string, err error) error {
 }
 
 // OpenWithFinalizer implements the rtos.FS OpenWithFinalizer method.
-func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed func()) (fs.File, error) {
+func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed func()) (f fs.File, err error) {
+	defer func() {
+		if err != nil {
+			closed()
+			err = wrapErr("open", name, err)
+		}
+	}()
 	if !fs.ValidPath(name) {
-		return nil, wrapErr("open", name, syscall.EINVAL)
+		return nil, syscall.EINVAL
 	}
 	if name == "." {
 		if flag&syscall.O_CREAT != 0 {
-			return nil, wrapErr("open", name, syscall.ENOTSUP)
+			return nil, syscall.ENOTSUP
 		}
 		return open(&fsys.root, name, closed, flag), nil
 	}
@@ -140,16 +146,18 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 	}
 	dir, base := findDir(&fsys.root, name)
 	if dir == nil {
-		return nil, wrapErr("open", base, syscall.ENOENT)
+		name = base
+		return nil, syscall.ENOENT
 	}
 	if dir.isFile != nil {
-		return nil, wrapErr("open", base, syscall.ENOTDIR)
+		name = base
+		return nil, syscall.ENOTDIR
 	}
 	n := find(dir, base)
 	if n == nil {
 		if atomic.AddInt64(&fsys.size, emptyFileSize) > fsys.maxSize {
 			atomic.AddInt64(&fsys.size, -emptyFileSize)
-			return nil, wrapErr("open", name, syscall.ENOSPC)
+			return nil, syscall.ENOSPC
 		}
 		atomic.AddInt32(&fsys.items, 1)
 		mtime := time.Now()
