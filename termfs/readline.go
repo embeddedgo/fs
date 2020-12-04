@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"strconv"
+	"syscall"
 )
 
 const esc = '\x1b'
@@ -115,7 +116,7 @@ func (f *file) readLine(p []byte) (n int, err error) {
 			continue
 		case '\x03': // ANSI End Of Text (^C)
 			f.fs.line = f.fs.line[:0]
-			return 0, io.EOF // discard the current line and return immediately
+			return 0, syscall.ECANCELED // discard data and return immediately
 		case '\x04': // ANSI End Of Transmission (^D)
 			x = len(f.fs.line)
 			f.fs.rpos = 0
