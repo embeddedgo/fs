@@ -15,7 +15,7 @@ const esc = '\x1b'
 
 var errLineTooLong = errors.New("line too long")
 
-func (f *file) readLine(p []byte) (n int, err error) {
+func readLine(f *file, p []byte) (n int, err error) {
 	if f.fs.rpos < 0 && f.fs.flags&eof != 0 {
 		f.fs.flags &^= eof
 		return 0, io.EOF
@@ -114,7 +114,7 @@ func (f *file) readLine(p []byte) (n int, err error) {
 				if f.fs.flags&echo != 0 {
 					if x != 0 {
 						buf = appendIntChar(f.fs.ansi[1:3], x, 'D')
-						if _, err := f.write(buf); err != nil {
+						if _, err := write(f, buf); err != nil {
 							return 0, err
 						}
 					}
@@ -146,7 +146,7 @@ func (f *file) readLine(p []byte) (n int, err error) {
 				continue // skip unsupported CSI sequence
 			}
 			if f.fs.flags&echo != 0 {
-				if _, err := f.write(buf); err != nil {
+				if _, err := write(f, buf); err != nil {
 					return 0, err
 				}
 			}
@@ -181,7 +181,7 @@ func (f *file) readLine(p []byte) (n int, err error) {
 				f.fs.ansi[4] = c
 				buf = f.fs.ansi[1:5]
 			}
-			if _, err := f.write(buf); err != nil {
+			if _, err := write(f, buf); err != nil {
 				return 0, err
 			}
 		}

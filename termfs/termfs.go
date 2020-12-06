@@ -179,7 +179,7 @@ func (f *file) Read(p []byte) (n int, err error) {
 	} else if !lineMode {
 		n, err = f.fs.r.Read(p)
 	} else {
-		n, err = f.readLine(p)
+		n, err = readLine(f, p)
 	}
 	f.fs.rlock.Unlock()
 	if lineMode {
@@ -195,12 +195,12 @@ func (f *file) Read(p []byte) (n int, err error) {
 	if f.fs.flags&echo == 0 || err != nil {
 		return n, wrapErr("read", err)
 	}
-	return f.write(p[:n])
+	return write(f, p[:n])
 }
 
 var crlf = [...]byte{'\r', '\n'}
 
-func (f *file) write(p []byte) (int, error) {
+func write(f *file, p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -250,7 +250,7 @@ func (f *file) Write(p []byte) (int, error) {
 	if f.flag == syscall.O_RDONLY {
 		return 0, wrapErr("write", syscall.ENOTSUP)
 	}
-	return f.write(p)
+	return write(f, p)
 }
 
 func (f *file) Stat() (fs.FileInfo, error) {
