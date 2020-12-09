@@ -79,19 +79,23 @@ func find(root *node, name string) *node {
 		name = name[:i]
 	}
 	root.lock.RLock()
-	defer root.lock.RUnlock()
-	for n := root.list; n != nil; n = n.next {
+	n := root.list
+	for n != nil {
 		if n.name == name {
 			if len(name1) == 0 {
-				return n
+				break
 			}
 			if n.isFile == nil {
-				return find(n, name1)
+				n = find(n, name1)
+				break
 			}
+			n = nil
 			break
 		}
+		n = n.next
 	}
-	return nil
+	root.lock.RUnlock()
+	return n
 }
 
 // findDir works like path.Split but also searches for a directory starting from
@@ -122,63 +126,68 @@ func wrapErr(op, name string, err error) error {
 
 // OpenWithFinalizer implements the rtos.FS OpenWithFinalizer method.
 func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed func()) (f fs.File, err error) {
-	defer func() {
-		if err != nil {
-			closed()
-			err = wrapErr("open", name, err)
+	for {
+		if !fs.ValidPath(name) {
+			err = syscall.EINVAL
+			break
 		}
-	}()
-	if !fs.ValidPath(name) {
-		return nil, syscall.EINVAL
-	}
-	if name == "." {
-		if flag&syscall.O_CREAT != 0 {
-			return nil, syscall.ENOTSUP
+		if name == "." {
+			if flag&syscall.O_CREAT != 0 {
+				err = syscall.ENOTSUP
+				break
+			}
+			return open(&fsys.root, name, closed, flag), nil
 		}
-		return open(&fsys.root, name, closed, flag), nil
-	}
-	if flag&syscall.O_CREAT == 0 {
-		n := find(&fsys.root, name)
+		if flag&syscall.O_CREAT == 0 {
+			n := find(&fsys.root, name)
+			if n == nil {
+				err = syscall.ENOENT
+				break
+			}
+			return open(n, name, closed, flag), nil
+		}
+		dir, base := findDir(&fsys.root, name)
+		if dir == nil {
+			name = base
+			err = syscall.ENOENT
+			break
+		}
+		if dir.isFile != nil {
+			name = base
+			err = syscall.ENOTDIR
+			break
+		}
+		n := find(dir, base)
 		if n == nil {
-			return nil, syscall.ENOENT
+			if atomic.AddInt64(&fsys.size, emptyFileSize) > fsys.maxSize {
+				atomic.AddInt64(&fsys.size, -emptyFileSize)
+				err = syscall.ENOSPC
+				break
+			}
+			atomic.AddInt32(&fsys.items, 1)
+			mtime := time.Now()
+			n := &node{
+				isFile:  fsys,
+				name:    base,
+				modSec:  mtime.Unix(),
+				modNsec: mtime.Nanosecond(),
+			}
+			dir.lock.Lock()
+			n.next = dir.list
+			dir.list = n
+			dir.modSec = n.modSec
+			dir.modNsec = n.modNsec
+			dir.lock.Unlock()
+			return open(n, name, closed, flag), nil
 		}
-		return open(n, name, closed, flag), nil
-	}
-	dir, base := findDir(&fsys.root, name)
-	if dir == nil {
-		name = base
-		return nil, syscall.ENOENT
-	}
-	if dir.isFile != nil {
-		name = base
-		return nil, syscall.ENOTDIR
-	}
-	n := find(dir, base)
-	if n == nil {
-		if atomic.AddInt64(&fsys.size, emptyFileSize) > fsys.maxSize {
-			atomic.AddInt64(&fsys.size, -emptyFileSize)
-			return nil, syscall.ENOSPC
+		if flag&syscall.O_EXCL == 0 {
+			return open(n, name, closed, flag), nil
 		}
-		atomic.AddInt32(&fsys.items, 1)
-		mtime := time.Now()
-		n := &node{
-			isFile:  fsys,
-			name:    base,
-			modSec:  mtime.Unix(),
-			modNsec: mtime.Nanosecond(),
-		}
-		dir.lock.Lock()
-		n.next = dir.list
-		dir.list = n
-		dir.modSec = n.modSec
-		dir.modNsec = n.modNsec
-		dir.lock.Unlock()
-		return open(n, name, closed, flag), nil
+		err = syscall.EEXIST
+		break
 	}
-	if flag&syscall.O_EXCL != 0 {
-		return nil, syscall.EEXIST
-	}
-	return open(n, name, closed, flag), nil
+	closed()
+	return nil, wrapErr("open", name, err)
 }
 
 func nop() {}

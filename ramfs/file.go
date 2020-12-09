@@ -25,7 +25,7 @@ type file struct {
 	closed func()
 }
 
-func (f *file) Read(p []byte) (int, error) {
+func (f *file) Read(p []byte) (n int, err error) {
 	if f.rdwr == syscall.O_WRONLY {
 		return 0, wrapErr("read", f.name, syscall.ENOTSUP)
 	}
@@ -33,21 +33,23 @@ func (f *file) Read(p []byte) (int, error) {
 		return 0, wrapErr("read", f.name, syscall.EISDIR)
 	}
 	f.lock.Lock()
-	defer f.lock.Unlock()
-	if f.closed == nil {
-		return 0, wrapErr("read", f.name, syscall.EBADF)
+	if f.closed != nil {
+		f.n.lock.RLock()
+		if f.pos < len(f.n.data) {
+			n = copy(p, f.n.data[f.pos:])
+			f.pos += n
+		} else {
+			err = io.EOF
+		}
+		f.n.lock.RUnlock()
+	} else {
+		err = wrapErr("read", f.name, syscall.EBADF)
 	}
-	f.n.lock.RLock()
-	defer f.n.lock.RUnlock()
-	if f.pos >= len(f.n.data) {
-		return 0, io.EOF
-	}
-	n := copy(p, f.n.data[f.pos:])
-	f.pos += n
-	return n, nil
+	f.lock.Unlock()
+	return
 }
 
-func (f *file) Write(p []byte) (int, error) {
+func (f *file) Write(p []byte) (n int, err error) {
 	if f.rdwr == syscall.O_RDONLY {
 		return 0, wrapErr("write", f.name, syscall.ENOTSUP)
 	}
@@ -55,41 +57,51 @@ func (f *file) Write(p []byte) (int, error) {
 		return 0, wrapErr("write", f.name, syscall.EISDIR)
 	}
 	f.lock.Lock()
-	defer f.lock.Unlock()
 	if f.closed == nil {
-		return 0, wrapErr("write", f.name, syscall.EBADF)
+		err = syscall.EBADF
+		goto end
 	}
 	f.n.lock.Lock()
-	defer f.n.lock.Unlock()
-	pos1 := f.pos + len(p)
-	if pos1 > cap(f.n.data) {
-		var roundUp int
-		switch {
-		case cap(f.n.data) < 64:
-			roundUp = 15
-		case cap(f.n.data) < 256:
-			roundUp = 31
-		default:
-			roundUp = 63
+	for {
+		pos1 := f.pos + len(p)
+		if pos1 > cap(f.n.data) {
+			var roundUp int
+			switch {
+			case cap(f.n.data) < 64:
+				roundUp = 15
+			case cap(f.n.data) < 256:
+				roundUp = 31
+			default:
+				roundUp = 63
+			}
+			newCap := (pos1 + roundUp) &^ roundUp
+			add := newCap - cap(f.n.data)
+			if atomic.AddInt64(&f.n.isFile.size, int64(add)) > f.n.isFile.maxSize {
+				atomic.AddInt64(&f.n.isFile.size, int64(-add))
+				err = syscall.ENOSPC
+				break
+			}
+			data1 := make([]byte, pos1, newCap)
+			copy(data1[:f.pos], f.n.data)
+			f.n.data = data1
+		} else if pos1 > len(f.n.data) {
+			f.n.data = f.n.data[:pos1]
 		}
-		newCap := (pos1 + roundUp) &^ roundUp
-		add := newCap - cap(f.n.data)
-		if atomic.AddInt64(&f.n.isFile.size, int64(add)) > f.n.isFile.maxSize {
-			atomic.AddInt64(&f.n.isFile.size, int64(-add))
-			return 0, wrapErr("write", f.name, syscall.ENOSPC)
-		}
-		data1 := make([]byte, pos1, newCap)
-		copy(data1[:f.pos], f.n.data)
-		f.n.data = data1
-	} else if pos1 > len(f.n.data) {
-		f.n.data = f.n.data[:pos1]
+		copy(f.n.data[f.pos:], p)
+		f.pos = pos1
+		mtime := time.Now()
+		f.n.modSec = mtime.Unix()
+		f.n.modNsec = mtime.Nanosecond()
+		n = len(p)
+		break
 	}
-	copy(f.n.data[f.pos:], p)
-	f.pos = pos1
-	mtime := time.Now()
-	f.n.modSec = mtime.Unix()
-	f.n.modNsec = mtime.Nanosecond()
-	return len(p), nil
+	f.n.lock.Unlock()
+end:
+	f.lock.Unlock()
+	if err != nil {
+		err = wrapErr("write", f.name, err)
+	}
+	return
 }
 
 func (f *file) Stat() (fs.FileInfo, error) {
@@ -106,12 +118,14 @@ func (f *file) Stat() (fs.FileInfo, error) {
 }
 
 func (f *file) Close() error {
+	var err error
 	f.lock.Lock()
-	defer f.lock.Unlock()
-	if f.closed == nil {
-		return wrapErr("close", f.name, syscall.EBADF)
+	if f.closed != nil {
+		f.closed()
+		f.closed = nil
+	} else {
+		err = wrapErr("close", f.name, syscall.EBADF)
 	}
-	f.closed()
-	f.closed = nil
-	return nil
+	f.lock.Unlock()
+	return err
 }
