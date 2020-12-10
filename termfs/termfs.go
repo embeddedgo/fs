@@ -22,8 +22,8 @@ type FS struct {
 	r     io.Reader
 	w     io.Writer
 	name  string
-	rlock sync.Mutex
-	wlock sync.Mutex
+	rmu   sync.Mutex
+	wmu   sync.Mutex
 	line  []byte
 	rpos  int
 	ansi  [7]byte
@@ -48,27 +48,27 @@ const (
 )
 
 func (fsys *FS) CharMap() CharMap {
-	fsys.rlock.Lock()
-	fsys.wlock.Lock()
+	fsys.rmu.Lock()
+	fsys.wmu.Lock()
 	cmap := fsys.flags & mapFlags
-	fsys.wlock.Unlock()
-	fsys.rlock.Unlock()
+	fsys.wmu.Unlock()
+	fsys.rmu.Unlock()
 	return cmap
 }
 
 func (fsys *FS) SetCharMap(cmap CharMap) {
-	fsys.rlock.Lock()
-	fsys.wlock.Lock()
+	fsys.rmu.Lock()
+	fsys.wmu.Lock()
 	fsys.flags = fsys.flags&^mapFlags | cmap&mapFlags
-	fsys.wlock.Unlock()
-	fsys.rlock.Unlock()
+	fsys.wmu.Unlock()
+	fsys.rmu.Unlock()
 }
 
 // Echo returns the echo configuration.
 func (fsys *FS) Echo() bool {
-	fsys.rlock.Lock()
+	fsys.rmu.Lock()
 	echo := fsys.flags&echo != 0
-	fsys.rlock.Unlock()
+	fsys.rmu.Unlock()
 	return echo
 }
 
@@ -76,22 +76,22 @@ func (fsys *FS) Echo() bool {
 // Read method. The echo is a confirmation that the reading goroutine is ready
 // to consume data.
 func (fsys *FS) SetEcho(on bool) {
-	fsys.rlock.Lock()
+	fsys.rmu.Lock()
 	if on {
 		fsys.flags |= echo
 	} else {
 		fsys.flags &^= echo
 	}
 	fsys.flags |= echo
-	fsys.rlock.Unlock()
+	fsys.rmu.Unlock()
 }
 
 // LineMode returns the configuration of line mode.
 func (fsys *FS) LineMode() (enabled bool, maxLen int) {
-	fsys.rlock.Lock()
+	fsys.rmu.Lock()
 	enabled = fsys.ansi[0] != 0
 	maxLen = cap(fsys.line)
-	fsys.rlock.Unlock()
+	fsys.rmu.Unlock()
 	return
 }
 
@@ -105,7 +105,7 @@ func (fsys *FS) LineMode() (enabled bool, maxLen int) {
 // the line before passing it to the reading goroutine. There is also simple one
 // line history implemented (use up, down arrows).
 func (fsys *FS) SetLineMode(enable bool, maxLen int) {
-	fsys.rlock.Lock()
+	fsys.rmu.Lock()
 	if enable {
 		fsys.ansi[0] = '\b' // useful to move cursor back in ANSI DCH sequence
 		fsys.ansi[1] = esc  // ANSI escape character
@@ -121,7 +121,7 @@ func (fsys *FS) SetLineMode(enable bool, maxLen int) {
 			fsys.line = make([]byte, 0, maxLen)
 		}
 	}
-	fsys.rlock.Unlock()
+	fsys.rmu.Unlock()
 }
 
 // OpenWithFinalizer implements the rtos.FS OpenWithFinalizer method. The name
@@ -172,7 +172,7 @@ func (f *file) Read(p []byte) (n int, err error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	f.fs.rlock.Lock()
+	f.fs.rmu.Lock()
 	lineMode := f.fs.ansi[0] != 0
 	if f.closed == nil {
 		err = wrapErr("read", syscall.EBADF)
@@ -181,7 +181,7 @@ func (f *file) Read(p []byte) (n int, err error) {
 	} else {
 		n, err = readLine(f, p)
 	}
-	f.fs.rlock.Unlock()
+	f.fs.rmu.Unlock()
 	if lineMode {
 		return n, err
 	}
@@ -204,8 +204,8 @@ func write(f *file, p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	f.fs.wlock.Lock()
-	defer f.fs.wlock.Unlock()
+	f.fs.wmu.Lock()
+	defer f.fs.wmu.Unlock()
 	if f.closed == nil {
 		return 0, wrapErr("write", syscall.EBADF)
 	}
@@ -260,10 +260,10 @@ func (f *file) Stat() (fs.FileInfo, error) {
 func (f *file) Close() error {
 	// we assume that closing a terminal file is rare operation so we use the
 	// following expensive locking sequence instead of an additional f.lock
-	f.fs.rlock.Lock()
-	f.fs.wlock.Lock()
-	defer f.fs.wlock.Unlock()
-	defer f.fs.rlock.Unlock()
+	f.fs.rmu.Lock()
+	f.fs.wmu.Lock()
+	defer f.fs.wmu.Unlock()
+	defer f.fs.rmu.Unlock()
 	if f.closed == nil {
 		return wrapErr("close", syscall.EBADF)
 	}

@@ -20,7 +20,7 @@ type file struct {
 	n    *node
 	rdwr int
 
-	lock   sync.Mutex // protects the fields below
+	mu     sync.Mutex // protects the fields below
 	pos    int
 	closed func()
 }
@@ -32,20 +32,20 @@ func (f *file) Read(p []byte) (n int, err error) {
 	if f.n.isFile == nil {
 		return 0, wrapErr("read", f.name, syscall.EISDIR)
 	}
-	f.lock.Lock()
+	f.mu.Lock()
 	if f.closed != nil {
-		f.n.lock.RLock()
+		f.n.mu.RLock()
 		if f.pos < len(f.n.data) {
 			n = copy(p, f.n.data[f.pos:])
 			f.pos += n
 		} else {
 			err = io.EOF
 		}
-		f.n.lock.RUnlock()
+		f.n.mu.RUnlock()
 	} else {
 		err = wrapErr("read", f.name, syscall.EBADF)
 	}
-	f.lock.Unlock()
+	f.mu.Unlock()
 	return
 }
 
@@ -56,12 +56,12 @@ func (f *file) Write(p []byte) (n int, err error) {
 	if f.n.isFile == nil {
 		return 0, wrapErr("write", f.name, syscall.EISDIR)
 	}
-	f.lock.Lock()
+	f.mu.Lock()
 	if f.closed == nil {
 		err = syscall.EBADF
 		goto end
 	}
-	f.n.lock.Lock()
+	f.n.mu.Lock()
 	for {
 		pos1 := f.pos + len(p)
 		if pos1 > cap(f.n.data) {
@@ -95,9 +95,9 @@ func (f *file) Write(p []byte) (n int, err error) {
 		n = len(p)
 		break
 	}
-	f.n.lock.Unlock()
+	f.n.mu.Unlock()
 end:
-	f.lock.Unlock()
+	f.mu.Unlock()
 	if err != nil {
 		err = wrapErr("write", f.name, err)
 	}
@@ -109,23 +109,23 @@ func (f *file) Stat() (fs.FileInfo, error) {
 		name:  path.Base(f.name),
 		isDir: f.n.isFile == nil,
 	}
-	f.n.lock.RLock()
+	f.n.mu.RLock()
 	info.modSec = f.n.modSec
 	info.modNsec = f.n.modNsec
 	info.size = len(f.n.data)
-	f.n.lock.RUnlock()
+	f.n.mu.RUnlock()
 	return info, nil
 }
 
 func (f *file) Close() error {
 	var err error
-	f.lock.Lock()
+	f.mu.Lock()
 	if f.closed != nil {
 		f.closed()
 		f.closed = nil
 	} else {
 		err = wrapErr("close", f.name, syscall.EBADF)
 	}
-	f.lock.Unlock()
+	f.mu.Unlock()
 	return err
 }

@@ -18,11 +18,11 @@ import (
 type node struct {
 	isFile *FS // non-nil for file, nil for directory
 
-	// the following three fields are protected by lock in the parent node
+	// the following three fields are protected by mx in the parent node
 	name string
 	next *node // points to the next node in the same directory
 
-	lock    sync.RWMutex // protects the following fields
+	mu      sync.RWMutex // protects the following fields
 	list    *node
 	data    []byte
 	modSec  int64
@@ -48,9 +48,9 @@ const (
 func (n *node) size() int64 {
 	size := dirSize
 	if n.isFile != nil {
-		n.lock.RLock()
+		n.mu.RLock()
 		size = emptyFileSize + cap(n.data)
-		n.lock.RUnlock()
+		n.mu.RUnlock()
 	}
 	return int64(size)
 }
@@ -78,7 +78,7 @@ func find(root *node, name string) *node {
 		name1 = name[i+1:]
 		name = name[:i]
 	}
-	root.lock.RLock()
+	root.mu.RLock()
 	n := root.list
 	for n != nil {
 		if n.name == name {
@@ -94,7 +94,7 @@ func find(root *node, name string) *node {
 		}
 		n = n.next
 	}
-	root.lock.RUnlock()
+	root.mu.RUnlock()
 	return n
 }
 
@@ -107,7 +107,7 @@ func findDir(root *node, name string) (dir *node, base string) {
 	}
 	dir = find(root, name[:i])
 	if dir == nil || dir.isFile != nil {
-		return dir, name[:i]
+		return dir, name[:i] // return the directory name
 	}
 	return dir, name[i+1:]
 }
@@ -125,16 +125,17 @@ func wrapErr(op, name string, err error) error {
 }
 
 // OpenWithFinalizer implements the rtos.FS OpenWithFinalizer method.
-func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed func()) (f fs.File, err error) {
-	for {
+func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed func()) (fs.File, error) {
+	var err error
+	{
 		if !fs.ValidPath(name) {
 			err = syscall.EINVAL
-			break
+			goto error
 		}
 		if name == "." {
 			if flag&syscall.O_CREAT != 0 {
 				err = syscall.ENOTSUP
-				break
+				goto error
 			}
 			return open(&fsys.root, name, closed, flag), nil
 		}
@@ -142,7 +143,7 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 			n := find(&fsys.root, name)
 			if n == nil {
 				err = syscall.ENOENT
-				break
+				goto error
 			}
 			return open(n, name, closed, flag), nil
 		}
@@ -150,19 +151,19 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 		if dir == nil {
 			name = base
 			err = syscall.ENOENT
-			break
+			goto error
 		}
 		if dir.isFile != nil {
 			name = base
 			err = syscall.ENOTDIR
-			break
+			goto error
 		}
 		n := find(dir, base)
 		if n == nil {
 			if atomic.AddInt64(&fsys.size, emptyFileSize) > fsys.maxSize {
 				atomic.AddInt64(&fsys.size, -emptyFileSize)
 				err = syscall.ENOSPC
-				break
+				goto error
 			}
 			atomic.AddInt32(&fsys.items, 1)
 			mtime := time.Now()
@@ -172,20 +173,20 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 				modSec:  mtime.Unix(),
 				modNsec: mtime.Nanosecond(),
 			}
-			dir.lock.Lock()
+			dir.mu.Lock()
 			n.next = dir.list
 			dir.list = n
 			dir.modSec = n.modSec
 			dir.modNsec = n.modNsec
-			dir.lock.Unlock()
+			dir.mu.Unlock()
 			return open(n, name, closed, flag), nil
 		}
 		if flag&syscall.O_EXCL == 0 {
 			return open(n, name, closed, flag), nil
 		}
 		err = syscall.EEXIST
-		break
 	}
+error:
 	closed()
 	return nil, wrapErr("open", name, err)
 }
@@ -205,37 +206,49 @@ func (fsys *FS) Name() string { return "" }
 
 // Mkdir creates a directory with a given name.
 func (fsys *FS) Mkdir(name string, _ fs.FileMode) error {
-	if !fs.ValidPath(name) {
-		return wrapErr("mkdir", name, syscall.EINVAL)
+	var err error
+	{
+		if !fs.ValidPath(name) {
+			err = syscall.EINVAL
+			goto error
+		}
+		if name == "." {
+			err = syscall.EEXIST
+			goto error
+		}
+		dir, base := findDir(&fsys.root, name)
+		if dir == nil {
+			name = base
+			err = syscall.ENOENT
+			goto error
+		}
+		if dir.isFile != nil {
+			name = base
+			err = syscall.ENOTDIR
+			goto error
+		}
+		if atomic.AddInt64(&fsys.size, dirSize) > fsys.maxSize {
+			atomic.AddInt64(&fsys.size, -dirSize)
+			err = syscall.ENOSPC
+			goto error
+		}
+		atomic.AddInt32(&fsys.items, 1)
+		mtime := time.Now()
+		n := &node{
+			name:    base,
+			modSec:  mtime.Unix(),
+			modNsec: mtime.Nanosecond(),
+		}
+		dir.mu.Lock()
+		n.next = dir.list
+		dir.list = n
+		dir.modSec = n.modSec
+		dir.modNsec = n.modNsec
+		dir.mu.Unlock()
+		return nil
 	}
-	if name == "." {
-		return wrapErr("mkdir", name, syscall.EEXIST)
-	}
-	dir, base := findDir(&fsys.root, name)
-	if dir == nil {
-		return wrapErr("mkdir", base, syscall.ENOENT)
-	}
-	if dir.isFile != nil {
-		return wrapErr("mkdir", base, syscall.ENOTDIR)
-	}
-	if atomic.AddInt64(&fsys.size, dirSize) > fsys.maxSize {
-		atomic.AddInt64(&fsys.size, -dirSize)
-		return wrapErr("mkdir", name, syscall.ENOSPC)
-	}
-	atomic.AddInt32(&fsys.items, 1)
-	mtime := time.Now()
-	n := &node{
-		name:    base,
-		modSec:  mtime.Unix(),
-		modNsec: mtime.Nanosecond(),
-	}
-	dir.lock.Lock()
-	n.next = dir.list
-	dir.list = n
-	dir.modSec = n.modSec
-	dir.modNsec = n.modNsec
-	dir.lock.Unlock()
-	return nil
+error:
+	return wrapErr("mkdir", name, err)
 }
 
 // Usage implements the rtos.UsageFS Usage method.
@@ -245,83 +258,111 @@ func (fsys *FS) Usage() (usedItems, maxItems int, usedBytes, maxBytes int64) {
 }
 
 func (fsys *FS) Remove(name string) error {
-	if !fs.ValidPath(name) {
-		return wrapErr("remove", name, syscall.EINVAL)
-	}
-	if name == "." {
-		return wrapErr("remove", name, syscall.ENOTSUP)
-	}
-	dir, base := findDir(&fsys.root, name)
-	if dir == nil {
-		return wrapErr("remove", name, syscall.ENOENT)
-	}
-	dir.lock.Lock()
-	n := dir.list
-	if n != nil {
-		if n.name == base {
-			dir.list = n.next
-		} else {
-			for {
-				prev := n
-				n = n.next
-				if n == nil {
-					break
-				}
-				if n.name == base {
-					prev.next = n.next
-					break
+	var err error
+	{
+		if !fs.ValidPath(name) {
+			err = syscall.EINVAL
+			goto error
+		}
+		if name == "." {
+			err = syscall.ENOTSUP
+			goto error
+		}
+		dir, base := findDir(&fsys.root, name)
+		if dir == nil {
+			name = base
+			err = syscall.ENOENT
+			goto error
+		}
+		if dir.isFile != nil {
+			name = base
+			err = syscall.ENOTDIR
+			goto error
+		}
+		dir.mu.Lock()
+		n := dir.list
+		if n != nil {
+			if n.name == base {
+				dir.list = n.next
+			} else {
+				for {
+					prev := n
+					n = n.next
+					if n == nil {
+						break
+					}
+					if n.name == base {
+						prev.next = n.next
+						break
+					}
 				}
 			}
 		}
+		dir.mu.Unlock()
+		if n == nil {
+			err = syscall.ENOENT
+			goto error
+		}
+		atomic.AddInt32(&fsys.items, -1)
+		atomic.AddInt64(&fsys.size, -n.size())
+		return nil
 	}
-	dir.lock.Unlock()
-	if n == nil {
-		return wrapErr("remove", name, syscall.ENOENT)
-	}
-	atomic.AddInt32(&fsys.items, -1)
-	atomic.AddInt64(&fsys.size, -n.size())
-	return nil
+error:
+	return wrapErr("remove", name, err)
 }
 
 func (fsys *FS) Rename(oldname, newname string) error {
-	olddir, oldbase := findDir(&fsys.root, oldname)
-	if olddir == nil {
-		return wrapErr("rename", oldname, syscall.ENOENT)
-	}
-	newdir, newbase := findDir(&fsys.root, newname)
-	if newdir == nil {
-		return wrapErr("rename", newname, syscall.ENOENT)
-	}
-
-	olddir.lock.Lock()
-	n := olddir.list
-	if n != nil {
-		if n.name == oldbase {
-			olddir.list = n.next
-		} else {
-			for {
-				prev := n
-				n = n.next
-				if n == nil {
-					break
-				}
-				if n.name == oldbase {
-					prev.next = n.next
-					break
+	var errName string
+	{
+		olddir, oldbase := findDir(&fsys.root, oldname)
+		if olddir == nil || olddir.isFile != nil {
+			errName = oldname
+			goto error
+		}
+		olddir.mu.Lock()
+		n := olddir.list
+		if n != nil {
+			if n.name == oldbase {
+				olddir.list = n.next
+			} else {
+				for {
+					prev := n
+					n = n.next
+					if n == nil {
+						break
+					}
+					if n.name == oldbase {
+						prev.next = n.next
+						break
+					}
 				}
 			}
 		}
+		olddir.mu.Unlock()
+		if n == nil {
+			errName = oldname
+			goto error
+		}
+		newdir, newbase := findDir(&fsys.root, newname)
+		if newdir == nil || newdir.isFile != nil {
+			// BUG: report ENOTDIR
+			olddir.mu.Lock()
+			n.next = olddir.list
+			olddir.list = n
+			olddir.mu.Unlock()
+			errName = newbase
+			goto error
+		}
+		// BUG: may be another file with the same name
+		n.name = newbase
+		newdir.mu.Lock()
+		n.next = newdir.list
+		newdir.list = n
+		newdir.mu.Unlock()
+		return nil
 	}
-	olddir.lock.Unlock()
-	if n == nil {
-		return wrapErr("rename", oldname, syscall.ENOENT)
-	}
-	n.name = newbase
-	newdir.lock.Lock()
-	n.next = newdir.list
-	newdir.list = n
-	newdir.lock.Unlock()
-	return nil
+error:
+	return wrapErr("rename", errName, syscall.ENOENT)
 }
 
 type fileInfo struct {
