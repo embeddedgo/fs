@@ -27,13 +27,17 @@ type file struct {
 
 func (f *file) Read(p []byte) (n int, err error) {
 	if f.rdwr == syscall.O_WRONLY {
-		return 0, wrapErr("read", f.name, syscall.ENOTSUP)
+		err = syscall.EBADF
+		goto end
 	}
-	if f.n.isFile == nil {
-		return 0, wrapErr("read", f.name, syscall.EISDIR)
+	if f.n.fileFS == nil {
+		err = syscall.EISDIR
+		goto end
 	}
 	f.mu.Lock()
-	if f.closed != nil {
+	if f.closed == nil {
+		err = syscall.EBADF
+	} else {
 		f.n.mu.RLock()
 		if f.pos < len(f.n.data) {
 			n = copy(p, f.n.data[f.pos:])
@@ -42,27 +46,29 @@ func (f *file) Read(p []byte) (n int, err error) {
 			err = io.EOF
 		}
 		f.n.mu.RUnlock()
-	} else {
-		err = wrapErr("read", f.name, syscall.EBADF)
 	}
 	f.mu.Unlock()
-	return
+end:
+	if err != nil && err != io.EOF {
+		err = wrapErr("read", f.name, err)
+	}
+	return n, err
 }
 
 func (f *file) Write(p []byte) (n int, err error) {
 	if f.rdwr == syscall.O_RDONLY {
-		return 0, wrapErr("write", f.name, syscall.ENOTSUP)
+		err = syscall.EBADF
+		goto end
 	}
-	if f.n.isFile == nil {
-		return 0, wrapErr("write", f.name, syscall.EISDIR)
+	if f.n.fileFS == nil {
+		err = syscall.EISDIR
+		goto end
 	}
 	f.mu.Lock()
 	if f.closed == nil {
 		err = syscall.EBADF
-		goto end
-	}
-	f.n.mu.Lock()
-	for {
+	} else {
+		f.n.mu.Lock()
 		pos1 := f.pos + len(p)
 		if pos1 > cap(f.n.data) {
 			var roundUp int
@@ -76,10 +82,10 @@ func (f *file) Write(p []byte) (n int, err error) {
 			}
 			newCap := (pos1 + roundUp) &^ roundUp
 			add := newCap - cap(f.n.data)
-			if atomic.AddInt64(&f.n.isFile.size, int64(add)) > f.n.isFile.maxSize {
-				atomic.AddInt64(&f.n.isFile.size, int64(-add))
+			if atomic.AddInt64(&f.n.fileFS.size, int64(add)) > f.n.fileFS.maxSize {
+				atomic.AddInt64(&f.n.fileFS.size, int64(-add))
 				err = syscall.ENOSPC
-				break
+				goto skip
 			}
 			data1 := make([]byte, pos1, newCap)
 			copy(data1[:f.pos], f.n.data)
@@ -89,25 +95,27 @@ func (f *file) Write(p []byte) (n int, err error) {
 		}
 		copy(f.n.data[f.pos:], p)
 		f.pos = pos1
-		mtime := time.Now()
-		f.n.modSec = mtime.Unix()
-		f.n.modNsec = mtime.Nanosecond()
+		{
+			mtime := time.Now()
+			f.n.modSec = mtime.Unix()
+			f.n.modNsec = mtime.Nanosecond()
+		}
 		n = len(p)
-		break
+	skip:
+		f.n.mu.Unlock()
 	}
-	f.n.mu.Unlock()
-end:
 	f.mu.Unlock()
+end:
 	if err != nil {
 		err = wrapErr("write", f.name, err)
 	}
-	return
+	return n, err
 }
 
 func (f *file) Stat() (fs.FileInfo, error) {
 	info := &fileInfo{
 		name:  path.Base(f.name),
-		isDir: f.n.isFile == nil,
+		isDir: f.n.fileFS == nil,
 	}
 	f.n.mu.RLock()
 	info.modSec = f.n.modSec
@@ -120,11 +128,11 @@ func (f *file) Stat() (fs.FileInfo, error) {
 func (f *file) Close() error {
 	var err error
 	f.mu.Lock()
-	if f.closed != nil {
+	if f.closed == nil {
+		err = wrapErr("close", f.name, syscall.EBADF)
+	} else {
 		f.closed()
 		f.closed = nil
-	} else {
-		err = wrapErr("close", f.name, syscall.EBADF)
 	}
 	f.mu.Unlock()
 	return err

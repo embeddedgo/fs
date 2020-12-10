@@ -16,7 +16,7 @@ import (
 
 // A node represents a filesystem node
 type node struct {
-	isFile *FS // non-nil for file, nil for directory
+	fileFS *FS // non-nil for file, nil for directory
 
 	// the following three fields are protected by mx in the parent node
 	name string
@@ -47,7 +47,7 @@ const (
 
 func (n *node) size() int64 {
 	size := dirSize
-	if n.isFile != nil {
+	if n.fileFS != nil {
 		n.mu.RLock()
 		size = emptyFileSize + cap(n.data)
 		n.mu.RUnlock()
@@ -85,7 +85,7 @@ func find(root *node, name string) *node {
 			if len(name1) == 0 {
 				break
 			}
-			if n.isFile == nil {
+			if n.fileFS == nil {
 				n = find(n, name1)
 				break
 			}
@@ -106,14 +106,14 @@ func findDir(root *node, name string) (dir *node, base string) {
 		return root, name
 	}
 	dir = find(root, name[:i])
-	if dir == nil || dir.isFile != nil {
+	if dir == nil || dir.fileFS != nil {
 		return dir, name[:i] // return the directory name
 	}
 	return dir, name[i+1:]
 }
 
 func open(n *node, name string, closed func(), flag int) fs.File {
-	if n.isFile == nil {
+	if n.fileFS == nil {
 		return &dir{name: name, n: n, closed: closed}
 	}
 	return &file{name: name, n: n, closed: closed,
@@ -153,7 +153,7 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 			err = syscall.ENOENT
 			goto error
 		}
-		if dir.isFile != nil {
+		if dir.fileFS != nil {
 			name = base
 			err = syscall.ENOTDIR
 			goto error
@@ -168,7 +168,7 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 			atomic.AddInt32(&fsys.items, 1)
 			mtime := time.Now()
 			n := &node{
-				isFile:  fsys,
+				fileFS:  fsys,
 				name:    base,
 				modSec:  mtime.Unix(),
 				modNsec: mtime.Nanosecond(),
@@ -222,7 +222,7 @@ func (fsys *FS) Mkdir(name string, _ fs.FileMode) error {
 			err = syscall.ENOENT
 			goto error
 		}
-		if dir.isFile != nil {
+		if dir.fileFS != nil {
 			name = base
 			err = syscall.ENOTDIR
 			goto error
@@ -274,7 +274,7 @@ func (fsys *FS) Remove(name string) error {
 			err = syscall.ENOENT
 			goto error
 		}
-		if dir.isFile != nil {
+		if dir.fileFS != nil {
 			name = base
 			err = syscall.ENOTDIR
 			goto error
@@ -312,11 +312,15 @@ error:
 }
 
 func (fsys *FS) Rename(oldname, newname string) error {
-	var errName string
+	var (
+		err error
+		n   *node
+	)
+	olddir, oldbase := findDir(&fsys.root, oldname)
 	{
-		olddir, oldbase := findDir(&fsys.root, oldname)
-		if olddir == nil || olddir.isFile != nil {
-			errName = oldname
+		if olddir == nil || olddir.fileFS != nil {
+			oldbase = oldname
+			err = syscall.ENOENT
 			goto error
 		}
 		olddir.mu.Lock()
@@ -340,17 +344,19 @@ func (fsys *FS) Rename(oldname, newname string) error {
 		}
 		olddir.mu.Unlock()
 		if n == nil {
-			errName = oldname
+			oldbase = oldname
+			err = syscall.ENOENT
 			goto error
 		}
 		newdir, newbase := findDir(&fsys.root, newname)
-		if newdir == nil || newdir.isFile != nil {
-			// BUG: report ENOTDIR
-			olddir.mu.Lock()
-			n.next = olddir.list
-			olddir.list = n
-			olddir.mu.Unlock()
-			errName = newbase
+		if newdir == nil {
+			oldbase = newbase
+			err = syscall.ENOENT
+			goto error
+		}
+		if newdir.fileFS != nil {
+			oldbase = newbase
+			err = syscall.ENOTDIR
 			goto error
 		}
 		// BUG: may be another file with the same name
@@ -362,7 +368,13 @@ func (fsys *FS) Rename(oldname, newname string) error {
 		return nil
 	}
 error:
-	return wrapErr("rename", errName, syscall.ENOENT)
+	if n != nil {
+		olddir.mu.Lock()
+		n.next = olddir.list
+		olddir.list = n
+		olddir.mu.Unlock()
+	}
+	return wrapErr("rename", oldbase, err)
 }
 
 type fileInfo struct {
