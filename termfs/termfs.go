@@ -159,62 +159,64 @@ type file struct {
 }
 
 func wrapErr(op string, err error) error {
-	if err != nil && err != io.EOF {
-		return &fs.PathError{Op: op, Path: ".", Err: err}
-	}
-	return err
+	return &fs.PathError{Op: op, Path: ".", Err: err}
 }
 
 func (f *file) Read(p []byte) (n int, err error) {
 	if f.flag == syscall.O_WRONLY {
-		return 0, wrapErr("read", syscall.ENOTSUP)
+		err = syscall.EBADF
+		goto end
 	}
 	if len(p) == 0 {
 		return 0, nil
 	}
-	f.fs.rmu.Lock()
-	lineMode := f.fs.ansi[0] != 0
-	if f.closed == nil {
-		err = wrapErr("read", syscall.EBADF)
-	} else if !lineMode {
-		n, err = f.fs.r.Read(p)
-	} else {
-		n, err = readLine(f, p)
-	}
-	f.fs.rmu.Unlock()
-	if lineMode {
-		return n, err
-	}
-	if f.fs.flags&InCRLF != 0 {
-		for i := 0; i < n; i++ {
-			if p[i] == '\r' {
-				p[i] = '\n'
+	{
+		f.fs.rmu.Lock()
+		lineMode := f.fs.ansi[0] != 0
+		flags := f.fs.flags
+		if f.closed == nil {
+			err = syscall.EBADF
+		} else if !lineMode {
+			n, err = f.fs.r.Read(p)
+		} else {
+			n, err = readLine(f, p)
+		}
+		f.fs.rmu.Unlock()
+		if !lineMode {
+			if flags&InCRLF != 0 {
+				for i := 0; i < n; i++ {
+					if p[i] == '\r' {
+						p[i] = '\n'
+					}
+				}
+			}
+			if flags&echo != 0 {
+				_, err = write(f, p[:n])
 			}
 		}
 	}
-	if f.fs.flags&echo == 0 || err != nil {
-		return n, wrapErr("read", err)
+end:
+	if err != nil && err != io.EOF {
+		err = wrapErr("read", err)
 	}
-	return write(f, p[:n])
+	return n, err
 }
 
 var crlf = [...]byte{'\r', '\n'}
 
-func write(f *file, p []byte) (int, error) {
+func write(f *file, p []byte) (n int, err error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
 	f.fs.wmu.Lock()
-	defer f.fs.wmu.Unlock()
 	if f.closed == nil {
-		return 0, wrapErr("write", syscall.EBADF)
+		err = syscall.EBADF
+		goto end
 	}
 	if f.fs.flags&OutLFCRLF == 0 {
-		n, err := f.fs.w.Write(p)
-		err = wrapErr("write", err)
-		return n, err
+		n, err = f.fs.w.Write(p)
+		goto end
 	}
-	n := 0
 	for {
 		m := n
 		for {
@@ -227,28 +229,34 @@ func write(f *file, p []byte) (int, error) {
 			}
 		}
 		if m != n {
-			m, err := f.fs.w.Write(p[n:m])
+			m, err = f.fs.w.Write(p[n:m])
 			n += m
 			if err != nil {
-				return n, wrapErr("write", err)
+				break
 			}
 			if n == len(p) {
-				return n, nil
+				break
 			}
 		}
-		if _, err := f.fs.w.Write(crlf[:]); err != nil {
-			return n, wrapErr("write", err)
+		if _, err = f.fs.w.Write(crlf[:]); err != nil {
+			break
 		}
 		n++
 		if n == len(p) {
-			return n, nil
+			break
 		}
 	}
+end:
+	f.fs.wmu.Unlock()
+	if err != nil {
+		err = wrapErr("write", err)
+	}
+	return n, err
 }
 
 func (f *file) Write(p []byte) (int, error) {
 	if f.flag == syscall.O_RDONLY {
-		return 0, wrapErr("write", syscall.ENOTSUP)
+		return 0, wrapErr("write", syscall.EBADF)
 	}
 	return write(f, p)
 }
@@ -257,19 +265,20 @@ func (f *file) Stat() (fs.FileInfo, error) {
 	return &fileinfo{}, nil
 }
 
-func (f *file) Close() error {
+func (f *file) Close() (err error) {
 	// we assume that closing a terminal file is rare operation so we use the
 	// following expensive locking sequence instead of an additional f.lock
 	f.fs.rmu.Lock()
 	f.fs.wmu.Lock()
-	defer f.fs.wmu.Unlock()
-	defer f.fs.rmu.Unlock()
 	if f.closed == nil {
-		return wrapErr("close", syscall.EBADF)
+		err = wrapErr("close", syscall.EBADF)
+	} else {
+		f.closed()
+		f.closed = nil
 	}
-	f.closed()
-	f.closed = nil
-	return nil
+	f.fs.wmu.Unlock()
+	f.fs.rmu.Unlock()
+	return err
 }
 
 type fileinfo struct{}

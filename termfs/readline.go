@@ -20,12 +20,6 @@ func readLine(f *file, p []byte) (n int, err error) {
 		f.fs.flags &^= eof
 		return 0, io.EOF
 	}
-	defer func() {
-		if err != nil {
-			f.fs.line = f.fs.line[:0]
-			err = wrapErr("read", err)
-		}
-	}()
 	for x := 0; f.fs.rpos < 0; {
 		if len(f.fs.line) == cap(f.fs.line) {
 			return 0, errLineTooLong
