@@ -45,7 +45,7 @@ const (
 	dirSize       = nodeSize
 )
 
-func (n *node) size() int64 {
+func size(n *node) int64 {
 	size := dirSize
 	if n.fileFS != nil {
 		n.mu.RLock()
@@ -53,6 +53,18 @@ func (n *node) size() int64 {
 		n.mu.RUnlock()
 	}
 	return int64(size)
+}
+
+func stat(n *node) *fileInfo {
+	fi := new(fileInfo)
+	fi.name = n.name
+	n.mu.RLock()
+	fi.isDir = n.fileFS == nil
+	fi.modSec = n.modSec
+	fi.modNsec = n.modNsec
+	fi.size = len(n.data)
+	n.mu.RUnlock()
+	return fi
 }
 
 // An FS represents a file system in RAM.
@@ -257,6 +269,35 @@ func (fsys *FS) Usage() (usedItems, maxItems int, usedBytes, maxBytes int64) {
 		atomic.LoadInt64(&fsys.size), fsys.maxSize
 }
 
+func unlink(dir *node, name string) *node {
+	dir.mu.Lock()
+	n := dir.list
+	if n != nil {
+		if n.name == name {
+			dir.list = n.next
+		} else {
+			for {
+				prev := n
+				n = n.next
+				if n == nil {
+					break
+				}
+				if n.name == name {
+					prev.next = n.next
+					break
+				}
+			}
+		}
+		if n != nil {
+			mtime := time.Now()
+			dir.modSec = mtime.Unix()
+			dir.modNsec = mtime.Nanosecond()
+		}
+	}
+	dir.mu.Unlock()
+	return n
+}
+
 func (fsys *FS) Remove(name string) error {
 	var err error
 	{
@@ -279,32 +320,13 @@ func (fsys *FS) Remove(name string) error {
 			err = syscall.ENOTDIR
 			goto error
 		}
-		dir.mu.Lock()
-		n := dir.list
-		if n != nil {
-			if n.name == base {
-				dir.list = n.next
-			} else {
-				for {
-					prev := n
-					n = n.next
-					if n == nil {
-						break
-					}
-					if n.name == base {
-						prev.next = n.next
-						break
-					}
-				}
-			}
-		}
-		dir.mu.Unlock()
+		n := unlink(dir, base)
 		if n == nil {
 			err = syscall.ENOENT
 			goto error
 		}
 		atomic.AddInt32(&fsys.items, -1)
-		atomic.AddInt64(&fsys.size, -n.size())
+		atomic.AddInt64(&fsys.size, -size(n))
 		return nil
 	}
 error:
@@ -323,26 +345,7 @@ func (fsys *FS) Rename(oldname, newname string) error {
 			err = syscall.ENOENT
 			goto error
 		}
-		olddir.mu.Lock()
-		n := olddir.list
-		if n != nil {
-			if n.name == oldbase {
-				olddir.list = n.next
-			} else {
-				for {
-					prev := n
-					n = n.next
-					if n == nil {
-						break
-					}
-					if n.name == oldbase {
-						prev.next = n.next
-						break
-					}
-				}
-			}
-		}
-		olddir.mu.Unlock()
+		n = unlink(olddir, oldbase)
 		if n == nil {
 			oldbase = oldname
 			err = syscall.ENOENT
@@ -364,6 +367,9 @@ func (fsys *FS) Rename(oldname, newname string) error {
 		newdir.mu.Lock()
 		n.next = newdir.list
 		newdir.list = n
+		mtime := time.Now()
+		newdir.modSec = mtime.Unix()
+		newdir.modNsec = mtime.Nanosecond()
 		newdir.mu.Unlock()
 		return nil
 	}
@@ -400,3 +406,8 @@ func (fi *fileInfo) Mode() fs.FileMode {
 	}
 	return 0666
 }
+
+// fs.DirEntry interface
+
+func (fi *fileInfo) Type() fs.FileMode          { return fi.Mode() }
+func (fi *fileInfo) Info() (fs.FileInfo, error) { return fi, nil }

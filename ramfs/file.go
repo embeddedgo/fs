@@ -7,7 +7,6 @@ package ramfs
 import (
 	"io"
 	"io/fs"
-	"path"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -17,10 +16,10 @@ import (
 // A file represents an open file
 type file struct {
 	name string
-	n    *node
 	rdwr int
 
 	mu     sync.Mutex // protects the fields below
+	n      *node
 	pos    int
 	closed func()
 }
@@ -30,13 +29,11 @@ func (f *file) Read(p []byte) (n int, err error) {
 		err = syscall.EBADF
 		goto end
 	}
-	if f.n.fileFS == nil {
-		err = syscall.EISDIR
-		goto end
-	}
 	f.mu.Lock()
-	if f.closed == nil {
+	if f.n == nil {
 		err = syscall.EBADF
+	} else if f.n.fileFS == nil {
+		err = syscall.EISDIR
 	} else {
 		f.n.mu.RLock()
 		if f.pos < len(f.n.data) {
@@ -60,13 +57,11 @@ func (f *file) Write(p []byte) (n int, err error) {
 		err = syscall.EBADF
 		goto end
 	}
-	if f.n.fileFS == nil {
-		err = syscall.EISDIR
-		goto end
-	}
 	f.mu.Lock()
-	if f.closed == nil {
+	if f.n == nil {
 		err = syscall.EBADF
+	} else if f.n.fileFS == nil {
+		err = syscall.EISDIR
 	} else {
 		f.n.mu.Lock()
 		pos1 := f.pos + len(p)
@@ -113,26 +108,21 @@ end:
 }
 
 func (f *file) Stat() (fs.FileInfo, error) {
-	info := &fileInfo{
-		name:  path.Base(f.name),
-		isDir: f.n.fileFS == nil,
-	}
-	f.n.mu.RLock()
-	info.modSec = f.n.modSec
-	info.modNsec = f.n.modNsec
-	info.size = len(f.n.data)
-	f.n.mu.RUnlock()
-	return info, nil
+	f.mu.Lock()
+	fi := stat(f.n)
+	f.mu.Unlock()
+	return fi, nil
 }
 
 func (f *file) Close() error {
 	var err error
 	f.mu.Lock()
-	if f.closed == nil {
+	if f.n == nil {
 		err = wrapErr("close", f.name, syscall.EBADF)
 	} else {
 		f.closed()
 		f.closed = nil
+		f.n = nil
 	}
 	f.mu.Unlock()
 	return err
