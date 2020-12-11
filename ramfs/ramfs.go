@@ -73,11 +73,13 @@ type FS struct {
 	maxSize int64
 	root    node
 	items   int32
+	name    string
 }
 
-func New(maxSize int64) *FS {
+func New(name string, maxSize int64) *FS {
 	fsys := new(FS)
 	fsys.maxSize = maxSize
+	fsys.name = name
 	fsys.root.name = "."
 	return fsys
 }
@@ -214,7 +216,7 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 func (fsys *FS) Type() string { return "ram" }
 
 // Name implements the rtos.FS Name method.
-func (fsys *FS) Name() string { return "" }
+func (fsys *FS) Name() string { return fsys.name }
 
 // Mkdir creates a directory with a given name.
 func (fsys *FS) Mkdir(name string, _ fs.FileMode) error {
@@ -407,7 +409,6 @@ func (fi *fileInfo) Mode() fs.FileMode {
 	return 0666
 }
 
-// fs.DirEntry interface
-
+// Additional methods to implement fs.DirEntry interface
 func (fi *fileInfo) Type() fs.FileMode          { return fi.Mode() }
 func (fi *fileInfo) Info() (fs.FileInfo, error) { return fi, nil }

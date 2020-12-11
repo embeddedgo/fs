@@ -22,7 +22,7 @@ type dir struct {
 }
 
 func (d *dir) Read(p []byte) (int, error) {
-	return 0, syscall.ENOTSUP
+	return 0, syscall.EISDIR
 }
 
 func (d *dir) Stat() (fs.FileInfo, error) {
