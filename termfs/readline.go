@@ -114,9 +114,6 @@ func readLine(f *file, p []byte) (n int, err error) {
 					}
 					buf = appendIntChar(f.fs.ansi[1:3], len(f.fs.line), 'P')
 				}
-				if m := len(f.fs.line); m != cap(f.fs.line) {
-					f.fs.line[:m+1][m] = 0
-				}
 				f.fs.line = f.fs.line[:0]
 				x = 0
 			//case '1': // xterm CTRL + Arrow, used to move cursor by word
@@ -180,22 +177,27 @@ func readLine(f *file, p []byte) (n int, err error) {
 			}
 		}
 		if c == '\b' {
+			// delete a byte
+			// BUG: UTF8!
 			x--
 			m--
 			if x != m {
 				copy(f.fs.line[x:], f.fs.line[x+1:])
 			}
-			f.fs.line[m] = 0
 			f.fs.line = f.fs.line[:m]
-			continue
+		} else {
+			// insert new byte
+			f.fs.line = f.fs.line[:m+1]
+			if x != m {
+				copy(f.fs.line[x+1:], f.fs.line[x:])
+			}
+			f.fs.line[x] = c
+			x++
 		}
-		// insert new char
-		f.fs.line = f.fs.line[:m+1]
-		if x != m {
-			copy(f.fs.line[x+1:], f.fs.line[x:])
+		// ensure the line is null terminated (used by one line history)
+		if m := len(f.fs.line); m != cap(f.fs.line) {
+			f.fs.line[:m+1][m] = 0
 		}
-		f.fs.line[x] = c
-		x++
 	}
 	n = copy(p, f.fs.line[f.fs.rpos:])
 	f.fs.rpos += n
