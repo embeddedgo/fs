@@ -81,6 +81,9 @@ func New(name string, maxSize int64) *FS {
 	fsys.maxSize = maxSize
 	fsys.name = name
 	fsys.root.name = "."
+	ctime := time.Now()
+	fsys.root.modSec = ctime.Unix()
+	fsys.root.modNsec = ctime.Nanosecond()
 	return fsys
 }
 
@@ -404,7 +407,7 @@ func (fi *fileInfo) ModTime() time.Time {
 
 func (fi *fileInfo) Mode() fs.FileMode {
 	if fi.isDir {
-		return fs.ModeDir & 0777
+		return fs.ModeDir | 0777
 	}
 	return 0666
 }
