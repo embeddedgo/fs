@@ -47,7 +47,7 @@ func (f *file) Read(p []byte) (n int, err error) {
 	f.mu.Unlock()
 end:
 	if err != nil && err != io.EOF {
-		err = wrapErr("read", f.name, err)
+		err = &fs.PathError{Op: "read", Path: f.name, Err: err}
 	}
 	return n, err
 }
@@ -102,7 +102,7 @@ func (f *file) Write(p []byte) (n int, err error) {
 	f.mu.Unlock()
 end:
 	if err != nil {
-		err = wrapErr("write", f.name, err)
+		err = &fs.PathError{Op: "write", Path: f.name, Err: err}
 	}
 	return n, err
 }
@@ -118,7 +118,7 @@ func (f *file) Close() error {
 	var err error
 	f.mu.Lock()
 	if f.n == nil {
-		err = wrapErr("close", f.name, syscall.EBADF)
+		err = &fs.PathError{Op: "close", Path: f.name, Err: syscall.EBADF}
 	} else {
 		f.closed()
 		f.closed = nil

@@ -129,16 +129,12 @@ func findDir(root *node, name string) (dir *node, base string) {
 	return dir, name[i+1:]
 }
 
-func open(n *node, name string, closed func(), flag int) fs.File {
+func open(n *node, name string, closed func(), flag, pos int) fs.File {
 	if n.fileFS == nil {
 		return &dir{name: name, n: n, closed: closed}
 	}
-	return &file{name: name, n: n, closed: closed,
+	return &file{name: name, n: n, pos: pos, closed: closed,
 		rdwr: flag & (syscall.O_RDONLY | syscall.O_WRONLY | syscall.O_RDWR)}
-}
-
-func wrapErr(op, name string, err error) error {
-	return &fs.PathError{Op: op, Path: name, Err: err}
 }
 
 // OpenWithFinalizer implements the rtos.FS OpenWithFinalizer method.
@@ -154,15 +150,24 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 				err = syscall.ENOTSUP
 				goto error
 			}
-			return open(&fsys.root, name, closed, flag), nil
+			return open(&fsys.root, name, closed, flag, 0), nil
+		}
+		if n := find(&fsys.root, name); n != nil {
+			pos := 0
+			if flag&(syscall.O_TRUNC|syscall.O_APPEND) != 0 {
+				n.mu.Lock()
+				if flag&syscall.O_TRUNC != 0 {
+					n.data = nil
+				} else {
+					pos = len(n.data)
+				}
+				n.mu.Unlock()
+			}
+			return open(n, name, closed, flag, pos), nil
 		}
 		if flag&syscall.O_CREAT == 0 {
-			n := find(&fsys.root, name)
-			if n == nil {
-				err = syscall.ENOENT
-				goto error
-			}
-			return open(n, name, closed, flag), nil
+			err = syscall.ENOENT
+			goto error
 		}
 		dir, base := findDir(&fsys.root, name)
 		if dir == nil {
@@ -196,16 +201,16 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 			dir.modSec = n.modSec
 			dir.modNsec = n.modNsec
 			dir.mu.Unlock()
-			return open(n, name, closed, flag), nil
+			return open(n, name, closed, flag, 0), nil
 		}
 		if flag&syscall.O_EXCL == 0 {
-			return open(n, name, closed, flag), nil
+			return open(n, name, closed, flag, 0), nil
 		}
 		err = syscall.EEXIST
 	}
 error:
 	closed()
-	return nil, wrapErr("open", name, err)
+	return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 }
 
 func nop() {}
@@ -256,6 +261,7 @@ func (fsys *FS) Mkdir(name string, _ fs.FileMode) error {
 			modSec:  mtime.Unix(),
 			modNsec: mtime.Nanosecond(),
 		}
+		// BUG: check does dir exist
 		dir.mu.Lock()
 		n.next = dir.list
 		dir.list = n
@@ -265,7 +271,7 @@ func (fsys *FS) Mkdir(name string, _ fs.FileMode) error {
 		return nil
 	}
 error:
-	return wrapErr("mkdir", name, err)
+	return &fs.PathError{Op: "mkdir", Path: name, Err: err}
 }
 
 // Usage implements the rtos.UsageFS Usage method.
@@ -335,7 +341,7 @@ func (fsys *FS) Remove(name string) error {
 		return nil
 	}
 error:
-	return wrapErr("remove", name, err)
+	return &fs.PathError{Op: "remove", Path: name, Err: err}
 }
 
 func (fsys *FS) Rename(oldname, newname string) error {
@@ -385,7 +391,7 @@ error:
 		olddir.list = n
 		olddir.mu.Unlock()
 	}
-	return wrapErr("rename", oldbase, err)
+	return &fs.PathError{Op: "rename", Path: oldbase, Err: err}
 }
 
 type fileInfo struct {
