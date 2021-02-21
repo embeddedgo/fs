@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package termfs provides a lightwait implementation of terminal device
+// Package termfs provides a lightweight implementation of terminal device
 // filesystem.
 package termfs
 
