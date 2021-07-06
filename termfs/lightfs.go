@@ -73,7 +73,7 @@ func (f *lightFile) Write(p []byte) (n int, err error) {
 	f.fs.wmu.Lock()
 	n, err = f.fs.w.Write(p[:n])
 	if err != nil {
-		err = wrapErr("read", err)
+		err = wrapErr("write", err)
 	}
 	f.fs.wmu.Unlock()
 	return n, err
