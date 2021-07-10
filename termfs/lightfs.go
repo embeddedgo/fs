@@ -58,7 +58,7 @@ func (f *lightFile) Read(p []byte) (n int, err error) {
 		return 0, nil
 	}
 	f.fs.rmu.Lock()
-	n, err = f.fs.r.Read(p[:n])
+	n, err = f.fs.r.Read(p)
 	if err != nil && err != io.EOF {
 		err = wrapErr("read", err)
 	}
@@ -71,7 +71,7 @@ func (f *lightFile) Write(p []byte) (n int, err error) {
 		return 0, nil
 	}
 	f.fs.wmu.Lock()
-	n, err = f.fs.w.Write(p[:n])
+	n, err = f.fs.w.Write(p)
 	if err != nil {
 		err = wrapErr("write", err)
 	}
