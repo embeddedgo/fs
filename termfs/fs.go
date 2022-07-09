@@ -281,4 +281,4 @@ func (fi *fileinfo) Size() int64        { return 0 }
 func (fi *fileinfo) Mode() fs.FileMode  { return fs.ModeDevice | 0666 }
 func (fi *fileinfo) ModTime() time.Time { return time.Time{} }
 func (fi *fileinfo) IsDir() bool        { return false }
-func (fi *fileinfo) Sys() interface{}   { return nil }
+func (fi *fileinfo) Sys() any           { return nil }
