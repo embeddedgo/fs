@@ -68,9 +68,11 @@ func (d *dir) Close() error {
 	if d.n == nil {
 		err = &fs.PathError{Op: "close", Path: d.name, Err: syscall.EBADF}
 	} else {
-		d.closed()
-		d.closed = nil
 		d.n = nil
+		if d.closed != nil {
+			d.closed()
+			d.closed = nil
+		}
 	}
 	d.mu.Unlock()
 	return err

@@ -209,15 +209,15 @@ func (fsys *FS) OpenWithFinalizer(name string, flag int, _ fs.FileMode, closed f
 		err = syscall.EEXIST
 	}
 error:
-	closed()
+	if closed != nil {
+		closed()
+	}
 	return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 }
 
-func nop() {}
-
 // Open implements the fs.FS Open method.
 func (fsys *FS) Open(name string) (fs.File, error) {
-	return fsys.OpenWithFinalizer(name, 0, 0, nop)
+	return fsys.OpenWithFinalizer(name, 0, 0, nil)
 }
 
 // Type implements the rtos.FS Type method.

@@ -120,9 +120,11 @@ func (f *file) Close() error {
 	if f.n == nil {
 		err = &fs.PathError{Op: "close", Path: f.name, Err: syscall.EBADF}
 	} else {
-		f.closed()
-		f.closed = nil
 		f.n = nil
+		if f.closed != nil {
+			f.closed()
+			f.closed = nil
+		}
 	}
 	f.mu.Unlock()
 	return err
