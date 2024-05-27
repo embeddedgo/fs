@@ -15,11 +15,12 @@ import (
 
 func openWithFinalizer(fsys *FS, name string, flag int, _ fs.FileMode, closed func()) (f fs.File, err error) {
 	mode := 0
-	switch {
-	case flag&syscall.O_RDONLY != 0:
+
+	switch flag & (syscall.O_RDONLY | syscall.O_RDWR | syscall.O_WRONLY) {
+	case syscall.O_RDONLY:
 		// rb: open binary file for reading from the beggining
 		mode = 1
-	case flag&syscall.O_RDWR != 0:
+	case syscall.O_RDWR:
 		switch flag & (syscall.O_CREAT | syscall.O_TRUNC | syscall.O_APPEND) {
 		case 0:
 			// r+b: open binary file for read/writing at the beggining
@@ -31,7 +32,7 @@ func openWithFinalizer(fsys *FS, name string, flag int, _ fs.FileMode, closed fu
 			// a+b: open or create binary file for appending and reading
 			mode = 11
 		}
-	case flag&syscall.O_WRONLY != 0:
+	case syscall.O_WRONLY:
 		switch flag & (syscall.O_CREAT | syscall.O_TRUNC | syscall.O_APPEND) {
 		case syscall.O_CREAT | syscall.O_TRUNC:
 			// wb: truncate or create binary file for writing
@@ -40,6 +41,8 @@ func openWithFinalizer(fsys *FS, name string, flag int, _ fs.FileMode, closed fu
 			// ab: open or create text file for appending
 			mode = 9
 		}
+	default:
+		return nil, syscall.ENOTSUP
 	}
 	hostPath := ":tt"
 	switch name {

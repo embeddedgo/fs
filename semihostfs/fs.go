@@ -32,7 +32,7 @@ func (fsys *FS) Type() string { return "semihost" }
 // Name implements the rtos.FS Name method.
 func (fsys *FS) Name() string { return fsys.name }
 
-// Usage
+// Usage implements the rtos.FS Usage method.
 func (fsys *FS) Usage() (usedItems, maxItems int, usedBytes, maxBytes int64) {
 	return -1, -1, -1, -1
 }
