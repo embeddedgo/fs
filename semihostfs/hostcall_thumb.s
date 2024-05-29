@@ -4,6 +4,8 @@
 
 #include "textflag.h"
 
+// https://github.com/ARM-software/abi-aa/blob/main/semihosting/semihosting.rst
+
 // func hostCall(cmd int, arg unsafe.Pointer) int
 TEXT ·hostCall(SB),NOSPLIT|NOFRAME,$0-12
 	MOVW  cmd+0(FP), R0
