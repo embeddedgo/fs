@@ -14,6 +14,8 @@ import (
 	"unsafe"
 )
 
+const ptrSize = 4 << (^uintptr(0) >> 63)
+
 type file struct {
 	name   string
 	fd     int
@@ -28,7 +30,12 @@ func (f *file) Close() (err error) {
 	f.closed = nil
 	if f.name == ":stderr" {
 		const SysExitApplicationExit = 0x20026 // graceful exit
-		hostCall(0x18, unsafe.Pointer(uintptr(SysExitApplicationExit)))
+		if ptrSize == 32 {
+			hostCall(0x18, unsafe.Pointer(uintptr(SysExitApplicationExit)))
+		} else {
+			args := [2]int{SysExitApplicationExit, 0}
+			hostCall(0x18, unsafe.Pointer(&args))
+		}
 	}
 	return
 }
