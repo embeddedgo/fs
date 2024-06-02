@@ -14,8 +14,6 @@ import (
 	"unsafe"
 )
 
-const ptrSize = 4 << (^uintptr(0) >> 63)
-
 type file struct {
 	name   string
 	fd     int
@@ -23,18 +21,24 @@ type file struct {
 }
 
 func (f *file) Close() (err error) {
-	if hostCall(0x02, unsafe.Pointer(&f.fd)) == -1 {
+	ptr := unsafe.Pointer(&f.fd)
+	mt.Lock()
+	if hostCall(0x02, uintptr(ptr), ptr) == -1 {
 		err = hostError()
 	}
+	mt.Unlock()
 	f.closed()
 	f.closed = nil
 	if f.name == ":stderr" {
-		const SysExitApplicationExit = 0x20026 // graceful exit
+		const (
+			sysExitApplicationExit = 0x20026 // graceful exit
+			ptrSize                = 4 << (^uintptr(0) >> 63)
+		)
 		if ptrSize == 32 {
-			hostCall(0x18, unsafe.Pointer(uintptr(SysExitApplicationExit)))
+			hostCall(0x18, sysExitApplicationExit, nil)
 		} else {
-			args := [2]int{SysExitApplicationExit, 0}
-			hostCall(0x18, unsafe.Pointer(&args))
+			ptr := unsafe.Pointer(&[2]int{sysExitApplicationExit, 0})
+			hostCall(0x18, uintptr(ptr), ptr)
 		}
 	}
 	return
@@ -50,12 +54,15 @@ func (f *file) Read(p []byte) (n int, err error) {
 	if len(p) == 0 {
 		return
 	}
-	aptr := &rwargs{
+	ptr := unsafe.Pointer(&rwargs{
 		f.fd,
 		unsafe.SliceData(p),
 		len(p),
-	}
-	notRead := hostCall(0x06, unsafe.Pointer(aptr))
+	})
+
+	mt.Lock()
+	notRead := hostCall(0x06, uintptr(ptr), ptr)
+	mt.Unlock()
 	n = len(p) - notRead
 	if n == 0 {
 		err = io.EOF
@@ -67,16 +74,18 @@ func (f *file) WriteString(s string) (n int, err error) {
 	if len(s) == 0 {
 		return
 	}
-	aptr := &rwargs{
+	ptr := unsafe.Pointer(&rwargs{
 		f.fd,
 		unsafe.StringData(s),
 		len(s),
-	}
-	notWritten := hostCall(0x05, unsafe.Pointer(aptr))
-	n = len(s) - notWritten
+	})
+	mt.Lock()
+	notWritten := hostCall(0x05, uintptr(ptr), ptr)
 	if notWritten != 0 {
 		err = hostError()
 	}
+	mt.Unlock()
+	n = len(s) - notWritten
 	return
 
 }
@@ -91,14 +100,18 @@ type fileInfo struct {
 }
 
 func (f *file) Stat() (fi fs.FileInfo, err error) {
-	size := hostCall(0x0c, unsafe.Pointer(&f.fd))
+	ptr := unsafe.Pointer(&f.fd)
+	mt.Lock()
+	size := hostCall(0x0c, uintptr(ptr), ptr)
 	if size == -1 {
 		err = hostError()
-		return
 	}
-	fi = &fileInfo{
-		filepath.Base(f.name),
-		size,
+	mt.Unlock()
+	if size != -1 {
+		fi = &fileInfo{
+			filepath.Base(f.name),
+			size,
+		}
 	}
 	return
 }

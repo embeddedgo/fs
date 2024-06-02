@@ -60,17 +60,20 @@ func openWithFinalizer(fsys *FS, name string, flag int, _ fs.FileMode, closed fu
 		mode    int
 		pathLen int
 	}
-	aptr := &args{
+	ptr := unsafe.Pointer(&args{
 		unsafe.StringData(hostPath + "\x00"),
 		mode,
 		len(hostPath),
-	}
-	fd := hostCall(0x01, unsafe.Pointer(aptr))
+	})
+	mt.Lock()
+	fd := hostCall(0x01, uintptr(ptr), ptr)
 	if fd == -1 {
 		err = hostError()
-		return
 	}
-	f = &file{name, fd, closed}
+	mt.Unlock()
+	if fd != -1 {
+		f = &file{name, fd, closed}
+	}
 	return
 }
 
@@ -84,11 +87,14 @@ func remove(fsys *FS, name string) error {
 		pathLen int
 	}
 	hostPath := filepath.Join(fsys.root, name)
-	aptr := &args{
+	ptr := unsafe.Pointer(&args{
 		unsafe.StringData(hostPath + "\x00"),
 		len(hostPath),
-	}
-	if errno := hostCall(0x0e, unsafe.Pointer(aptr)); errno != 0 {
+	})
+	mt.Lock()
+	errno := hostCall(0x0e, uintptr(ptr), ptr)
+	mt.Unlock()
+	if errno != 0 {
 		return &Error{errno}
 	}
 	return nil
@@ -103,13 +109,16 @@ func rename(fsys *FS, oldname, newname string) error {
 	}
 	hostOld := filepath.Join(fsys.root, oldname)
 	hostNew := filepath.Join(fsys.root, newname)
-	aptr := &args{
+	ptr := unsafe.Pointer(&args{
 		unsafe.StringData(hostOld + "\x00"),
 		len(hostOld),
 		unsafe.StringData(hostNew + "\x00"),
 		len(hostNew),
-	}
-	if errno := hostCall(0x0f, unsafe.Pointer(aptr)); errno != 0 {
+	})
+	mt.Lock()
+	errno := hostCall(0x0f, uintptr(ptr), ptr)
+	mt.Unlock()
+	if errno != 0 {
 		return &Error{errno}
 	}
 	return nil

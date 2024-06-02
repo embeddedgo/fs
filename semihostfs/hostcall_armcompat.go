@@ -8,13 +8,14 @@ package semihostfs
 
 import (
 	"fmt"
+	"sync"
 	"unsafe"
 )
 
-// BUG: hostCall and the subsequent hostError must be protected with a mutex
+var mt sync.Mutex // for hostCall, hostError pair
 
 //go:noescape
-func hostCall(cmd int, arg unsafe.Pointer) int
+func hostCall(cmd int, arg uintptr, avoidGC unsafe.Pointer) int
 
 type Error struct {
 	no int
@@ -25,5 +26,5 @@ func (err *Error) Error() string {
 }
 
 func hostError() *Error {
-	return &Error{hostCall(0x13, nil)}
+	return &Error{hostCall(0x13, 0, nil)}
 }
