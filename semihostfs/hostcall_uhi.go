@@ -2,28 +2,21 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build riscv64 || thumb
+//go:build mips64
 
 package semihostfs
 
 import (
 	"fmt"
-	"unsafe"
 )
 
-// BUG: hostCall and the subsequent hostError must be protected with a mutex
-
 //go:noescape
-func hostCall(cmd int, arg unsafe.Pointer) int
+func hostCall(cmd int, a0, a1, a2 uintptr, avoidGC *byte) int
 
 type Error struct {
 	no int
 }
 
 func (err *Error) Error() string {
-	return fmt.Sprint("semihosting error: ", err.no)
-}
-
-func hostError() *Error {
-	return &Error{hostCall(0x13, nil)}
+	return fmt.Sprint("semihosting error: ", err.no) // TODO: decode errno
 }
