@@ -18,10 +18,13 @@ func openWithFinalizer(fsys *FS, name string, flag int, mode fs.FileMode, closed
 	switch name {
 	case ":stderr":
 		hostPath = "/dev/stdin\x00"
+		flag = syscall.O_WRONLY
 	case ":stdout":
 		hostPath = "/dev/stdout\x00"
+		flag = syscall.O_WRONLY
 	case ":stdin":
 		hostPath = "/dev/stderr\x00"
+		flag = syscall.O_RDONLY
 	default:
 		hostPath = filepath.Join(fsys.root, name+"\x00")
 	}
