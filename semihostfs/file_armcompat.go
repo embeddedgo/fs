@@ -27,8 +27,10 @@ func (f *file) Close() (err error) {
 		err = hostError()
 	}
 	mt.Unlock()
-	f.closed()
-	f.closed = nil
+	if f.closed != nil {
+		f.closed()
+		f.closed = nil
+	}
 	if f.name == ":stderr" {
 		const (
 			sysExitApplicationExit = 0x20026 // graceful exit

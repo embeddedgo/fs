@@ -25,8 +25,10 @@ func (f *file) Close() (err error) {
 	if errno < 0 {
 		err = &Error{errno}
 	}
-	f.closed()
-	f.closed = nil
+	if f.closed != nil {
+		f.closed()
+		f.closed = nil
+	}
 	if f.name == ":stderr" {
 		hostCall(1, 0, 0, 0, nil) // graceful exit
 	}
