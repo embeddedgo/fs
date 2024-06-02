@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"syscall"
 	"time"
 	"unsafe"
 )
@@ -21,10 +22,13 @@ type file struct {
 }
 
 func (f *file) Close() (err error) {
+	if f.name == "" {
+		return &fs.PathError{Op: "close", Path: f.name, Err: syscall.EBADF}
+	}
 	ptr := unsafe.Pointer(&f.fd)
 	mt.Lock()
 	if hostCall(0x02, uintptr(ptr), ptr) == -1 {
-		err = hostError()
+		err = &fs.PathError{Op: "close", Path: f.name, Err: hostError()}
 	}
 	mt.Unlock()
 	if f.closed != nil {
@@ -43,6 +47,7 @@ func (f *file) Close() (err error) {
 			hostCall(0x18, uintptr(ptr), ptr)
 		}
 	}
+	f.name = ""
 	return
 }
 
@@ -53,6 +58,9 @@ type rwargs struct {
 }
 
 func (f *file) Read(p []byte) (n int, err error) {
+	if f.name == "" {
+		return 0, &fs.PathError{Op: "read", Path: f.name, Err: syscall.EBADF}
+	}
 	if len(p) == 0 {
 		return
 	}
@@ -73,6 +81,9 @@ func (f *file) Read(p []byte) (n int, err error) {
 }
 
 func (f *file) WriteString(s string) (n int, err error) {
+	if f.name == "" {
+		return 0, &fs.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
+	}
 	if len(s) == 0 {
 		return
 	}
@@ -87,6 +98,9 @@ func (f *file) WriteString(s string) (n int, err error) {
 		err = hostError()
 	}
 	mt.Unlock()
+	if notWritten != 0 {
+		err = &fs.PathError{Op: "write", Path: f.name, Err: err}
+	}
 	n = len(s) - notWritten
 	return
 
@@ -102,6 +116,9 @@ type fileInfo struct {
 }
 
 func (f *file) Stat() (fi fs.FileInfo, err error) {
+	if f.name == "" {
+		return nil, &fs.PathError{Op: "stat", Path: f.name, Err: syscall.EBADF}
+	}
 	ptr := unsafe.Pointer(&f.fd)
 	mt.Lock()
 	size := hostCall(0x0c, uintptr(ptr), ptr)
@@ -109,7 +126,9 @@ func (f *file) Stat() (fi fs.FileInfo, err error) {
 		err = hostError()
 	}
 	mt.Unlock()
-	if size != -1 {
+	if size == -1 {
+		err = &fs.PathError{Op: "stat", Path: f.name, Err: err}
+	} else {
 		fi = &fileInfo{
 			filepath.Base(f.name),
 			size,

@@ -71,7 +71,9 @@ func openWithFinalizer(fsys *FS, name string, flag int, _ fs.FileMode, closed fu
 		err = hostError()
 	}
 	mt.Unlock()
-	if fd != -1 {
+	if fd == -1 {
+		err = &fs.PathError{Op: "open", Path: name, Err: err}
+	} else {
 		f = &file{name, fd, closed}
 	}
 	return
@@ -95,7 +97,7 @@ func remove(fsys *FS, name string) error {
 	errno := hostCall(0x0e, uintptr(ptr), ptr)
 	mt.Unlock()
 	if errno != 0 {
-		return &Error{errno}
+		return &fs.PathError{Op: "remove", Path: name, Err: &Error{errno}}
 	}
 	return nil
 }
@@ -119,7 +121,7 @@ func rename(fsys *FS, oldname, newname string) error {
 	errno := hostCall(0x0f, uintptr(ptr), ptr)
 	mt.Unlock()
 	if errno != 0 {
-		return &Error{errno}
+		return &fs.PathError{Op: "rename", Path: oldname, Err: &Error{errno}}
 	}
 	return nil
 }

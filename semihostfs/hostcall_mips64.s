@@ -19,6 +19,6 @@ TEXT ·hostCall(SB),NOSPLIT|NOFRAME,$0-48
 	SDBBP(1)
 	MOVV  $-1, R1
 	BNE   R1, R2, 2(PC)
-	SUB   R3, ZERO, R2
+	SUB   R3, R0, R2
 	MOVV  R2, ret+40(FP)
 	RET

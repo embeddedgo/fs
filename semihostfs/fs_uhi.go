@@ -37,7 +37,7 @@ func openWithFinalizer(fsys *FS, name string, flag int, mode fs.FileMode, closed
 		ptr,
 	)
 	if fd < 0 {
-		err = &Error{fd}
+		err = &fs.PathError{Op: "open", Path: name, Err: &Error{fd}}
 		return
 	}
 	f = &file{name, fd, closed}
@@ -53,7 +53,7 @@ func remove(fsys *FS, name string) error {
 	ptr := unsafe.StringData(hostPath)
 	errno := hostCall(7, uintptr(unsafe.Pointer(ptr)), 0, 0, ptr)
 	if errno < 0 {
-		return &Error{errno}
+		return &fs.PathError{Op: "remove", Path: name, Err: &Error{errno}}
 	}
 	return nil
 }

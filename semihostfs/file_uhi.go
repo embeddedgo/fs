@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"syscall"
 	"time"
 	"unsafe"
 )
@@ -21,9 +22,12 @@ type file struct {
 }
 
 func (f *file) Close() (err error) {
+	if f.name == "" {
+		return &fs.PathError{Op: "close", Path: f.name, Err: syscall.EBADF}
+	}
 	errno := hostCall(3, uintptr(f.fd), 0, 0, nil)
 	if errno < 0 {
-		err = &Error{errno}
+		err = &fs.PathError{Op: "close", Path: f.name, Err: &Error{errno}}
 	}
 	if f.closed != nil {
 		f.closed()
@@ -32,10 +36,14 @@ func (f *file) Close() (err error) {
 	if f.name == ":stderr" {
 		hostCall(1, 0, 0, 0, nil) // graceful exit
 	}
+	f.name = ""
 	return
 }
 
 func (f *file) Read(p []byte) (n int, err error) {
+	if f.name == "" {
+		return 0, &fs.PathError{Op: "read", Path: f.name, Err: syscall.EBADF}
+	}
 	if len(p) == 0 {
 		return
 	}
@@ -51,7 +59,7 @@ func (f *file) Read(p []byte) (n int, err error) {
 	case ne == 0:
 		err = io.EOF
 	case n < 0:
-		err = &Error{ne}
+		err = &fs.PathError{Op: "read", Path: f.name, Err: &Error{ne}}
 	default:
 		n = ne
 	}
@@ -59,6 +67,9 @@ func (f *file) Read(p []byte) (n int, err error) {
 }
 
 func (f *file) WriteString(s string) (n int, err error) {
+	if f.name == "" {
+		return 0, &fs.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
+	}
 	if len(s) == 0 {
 		return
 	}
@@ -72,7 +83,7 @@ func (f *file) WriteString(s string) (n int, err error) {
 	)
 	switch {
 	case n < 0:
-		err = &Error{ne}
+		err = &fs.PathError{Op: "write", Path: f.name, Err: &Error{ne}}
 	default:
 		n = ne
 	}
@@ -84,11 +95,14 @@ func (f *file) Write(p []byte) (int, error) {
 }
 
 func (f *file) Stat() (fi fs.FileInfo, err error) {
+	if f.name == "" {
+		return nil, &fs.PathError{Op: "stat", Path: f.name, Err: syscall.EBADF}
+	}
 	var info fileInfo
 	ptr := unsafe.Pointer(&info)
 	errno := hostCall(8, uintptr(f.fd), uintptr(ptr), 0, (*byte)(ptr))
 	if errno < 0 {
-		err = &Error{errno}
+		err = &fs.PathError{Op: "stat", Path: f.name, Err: &Error{errno}}
 		return
 	}
 	info.name = filepath.Base(f.name)
