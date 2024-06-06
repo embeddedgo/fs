@@ -33,9 +33,12 @@ func (f *file) Close() (err error) {
 		f.closed()
 		f.closed = nil
 	}
-	if f.name == ":stderr" {
-		hostCall(1, 0, 0, 0, nil) // graceful exit
-	}
+	/*
+		// Not needed anymore. Handled by runtime.exit.
+		if f.name == ":stderr" {
+			hostCall(1, 0, 0, 0, nil) // graceful exit
+		}
+	*/
 	f.name = ""
 	return
 }
