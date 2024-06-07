@@ -35,21 +35,6 @@ func (f *file) Close() (err error) {
 		f.closed()
 		f.closed = nil
 	}
-	/*
-		// Not needed anymore. Handled by runtime.exit.
-		if f.name == ":stderr" {
-			const (
-				sysExitApplicationExit = 0x20026 // graceful exit
-				ptrSize                = 4 << (^uintptr(0) >> 63)
-			)
-			if ptrSize == 32 {
-				hostCall(0x18, sysExitApplicationExit, nil)
-			} else {
-				ptr := unsafe.Pointer(&[2]int{sysExitApplicationExit, 0})
-				hostCall(0x18, uintptr(ptr), ptr)
-			}
-		}
-	*/
 	f.name = ""
 	return
 }
