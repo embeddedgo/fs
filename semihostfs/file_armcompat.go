@@ -68,6 +68,26 @@ func (f *file) Read(p []byte) (n int, err error) {
 	return
 }
 
+func seek(f *file, off int) (err error) {
+	var args [2]int
+	args[0] = f.fd
+	args[1] = off
+	ptr := unsafe.Pointer(&args)
+	mt.Lock()
+	if hostCall(0x0a, uintptr(ptr), ptr) < 0 {
+		err = &fs.PathError{Op: "seek", Path: f.name, Err: hostError()}
+	}
+	mt.Unlock()
+	return
+}
+
+func (f *file) ReadAt(p []byte, off int64) (n int, err error) {
+	if err = seek(f, int(off)); err != nil {
+		return
+	}
+	return f.Read(p)
+}
+
 func (f *file) WriteString(s string) (n int, err error) {
 	if f.name == "" {
 		return 0, &fs.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
@@ -96,6 +116,13 @@ func (f *file) WriteString(s string) (n int, err error) {
 
 func (f *file) Write(p []byte) (int, error) {
 	return f.WriteString(*(*string)(unsafe.Pointer(&p)))
+}
+
+func (f *file) WriteAt(p []byte, off int64) (n int, err error) {
+	if err = seek(f, int(off)); err != nil {
+		return
+	}
+	return f.Write(p)
 }
 
 type fileInfo struct {
